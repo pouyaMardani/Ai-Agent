@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="midnight" data-sidebar="expanded">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Token Harbor Chat - a local AI workspace that talks to the Token Harbor API through a Python backend."
+    />
+    <title>Token Harbor Chat</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/app.css" />
+    <!-- This tiny script runs before the first paint, so the saved theme and
+         sidebar state are applied instantly: no white flash, no layout jump. -->
+    <script src="/static/js/theme-boot.js"></script>
+  </head>
+
+  <body>
+    <!-- Ambient background: layered light only. No images, no canvas, no
+         libraries - just three blurred orbs and a faint mesh grid. -->
+    <div class="ambient" aria-hidden="true">
+      <span class="orb orb--1"></span>
+      <span class="orb orb--2"></span>
+      <span class="orb orb--3"></span>
+      <span class="mesh"></span>
+    </div>
+
+    <a class="skip-link" href="#composer-input">Skip to the message box</a>
+
+    <div class="shell">
+      <!-- ==================================================================
+           SIDEBAR - brand, new chat, search, history, settings
+           ================================================================== -->
+      <aside class="sidebar" id="sidebar" aria-label="Conversations">
+        <div class="sidebar__top">
+          <a class="brand" href="/" title="Token Harbor Chat">
+            <span class="brand__tile">
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+                <path
+                  d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7L12 2.6z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M12 7.6l1.8 2.6 2.6 1.8-2.6 1.8L12 16.4l-1.8-2.6L7.6 12l2.6-1.8L12 7.6z"
+                  fill="currentColor"
+                />
+              </svg>
+            </span>
+            <span class="brand__text">
+              <span class="brand__name">Token Harbor</span>
+              <span class="brand__sub">local AI workspace</span>
+            </span>
+          </a>
+
+          <button
+            id="collapse-btn"
+            class="icon-btn sidebar__collapse"
+            type="button"
+            data-icon="chevrons-left"
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
+          ></button>
+        </div>
+
+        <div class="sidebar__actions">
+          <button id="new-chat-btn" class="btn btn--primary new-chat" type="button">
+            <span class="ic" data-icon="plus"></span>
+            <span class="new-chat__label">New chat</span>
+            <span class="new-chat__kbd" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>O</kbd></span>
+          </button>
+
+          <div class="search">
+            <span class="search__icon" data-icon="search"></span>
+            <input
+              id="search-input"
+              class="search__input"
+              type="search"
+              placeholder="Search conversations"
+              aria-label="Search conversations"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button
+              id="search-clear"
+              class="icon-btn icon-btn--tiny search__clear"
+              type="button"
+              data-icon="close"
+              aria-label="Clear search"
+              hidden
+            ></button>
+          </div>
+        </div>
+
+        <nav class="history" aria-label="Conversation history">
+          <p class="history__label" id="history-label">History</p>
+          <ul id="conv-list" class="conv-list" role="list" aria-labelledby="history-label"></ul>
+          <p id="history-empty" class="history__note" hidden></p>
+        </nav>
+
+        <div class="sidebar__bottom">
+          <button id="settings-btn" class="nav-row" type="button" aria-haspopup="dialog">
+            <span class="ic" data-icon="sliders"></span>
+            <span class="nav-row__text">Settings</span>
+          </button>
+          <p class="sidebar__status">
+            <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+            <span id="status-text">Checking backend...</span>
+          </p>
+        </div>
+      </aside>
+
+      <div class="scrim" id="scrim" hidden></div>
+
+      <!-- ==================================================================
+           MAIN CHAT AREA
+           ================================================================== -->
+      <main class="chat" id="chat">
+        <p id="sr-status" class="sr-only" role="status" aria-live="polite"></p>
+
+        <header class="topbar">
+          <button
+            id="drawer-btn"
+            class="icon-btn topbar__drawer"
+            type="button"
+            data-icon="menu"
+            aria-label="Open conversation list"
+            aria-controls="sidebar"
+            aria-expanded="false"
+            title="Conversations"
+          ></button>
+
+          <div class="topbar__title">
+            <h1 class="topbar__heading" id="chat-title">New chat</h1>
+            <p class="topbar__meta" id="chat-meta">Ready when you are</p>
+          </div>
+
+          <div class="topbar__actions">
+            <button
+              id="model-pill"
+              class="pill model-pill"
+              type="button"
+              title="Active model - click to change it in Settings"
+              aria-haspopup="dialog"
+            >
+              <span class="pill__dot" aria-hidden="true"></span>
+              <span class="model-pill__name" id="model-name">detecting...</span>
+            </button>
+            <button
+              id="clear-btn"
+              class="icon-btn"
+              type="button"
+              data-icon="eraser"
+              aria-label="Clear this conversation"
+              title="Clear this conversation"
+            ></button>
+          </div>
+        </header>
+
+        <div class="thread-wrap">
+          <section class="thread" id="thread" tabindex="-1" aria-label="Conversation">
+            <div class="thread__inner" id="thread-inner"></div>
+          </section>
+
+          <button
+            id="scroll-bottom"
+            class="scroll-bottom"
+            type="button"
+            data-icon="arrow-down"
+            aria-label="Scroll to the latest message"
+            title="Latest message"
+            hidden
+          ></button>
+        </div>
+
+        <form class="composer" id="composer" autocomplete="off">
+          <div class="composer__shell">
+            <label class="sr-only" for="composer-input">Message</label>
+            <textarea
+              id="composer-input"
+              class="composer__input"
+              rows="1"
+              placeholder="Message Token Harbor..."
+              spellcheck="true"
+            ></textarea>
+            <div class="composer__row">
+              <span class="counter" id="counter" aria-hidden="true"></span>
+              <button id="send-btn" class="send-btn" type="submit" aria-label="Send message" title="Send message">
+                <span class="send-btn__icon" data-icon="send"></span>
+                <span class="send-btn__spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="composer__foot">
+            <p class="disclaimer">AI responses can be inaccurate - please double-check important information.</p>
+            <p class="composer__hint">
+              <kbd>Enter</kbd> to send <span class="dot-sep" aria-hidden="true">/</span>
+              <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+            </p>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <!-- ====================================================================
+         SETTINGS DIALOG - the theme selector lives here
+         ==================================================================== -->
+    <dialog id="settings-dialog" class="modal" aria-labelledby="settings-title">
+      <form method="dialog" class="modal__card">
+        <header class="modal__head">
+          <div>
+            <h2 class="modal__title" id="settings-title">Settings</h2>
+            <p class="modal__sub">Appearance and connection details</p>
+          </div>
+          <button class="icon-btn" type="submit" value="close" data-icon="close" aria-label="Close settings"></button>
+        </header>
+
+        <div class="modal__body">
+          <section class="group">
+            <h3 class="group__title">Theme</h3>
+            <p class="group__note">Pick the look you like. It is saved in this browser and restored on reload.</p>
+            <div class="theme-grid" id="theme-grid" role="radiogroup" aria-label="Theme"></div>
+          </section>
+
+          <section class="group">
+            <h3 class="group__title">Model</h3>
+            <p class="group__note">
+              Pick which model answers your messages. The list comes from the Python backend (.env) and your choice
+              is saved in this browser. It applies from your next message on.
+            </p>
+            <div class="model-grid" id="model-grid" role="radiogroup" aria-label="Model"></div>
+            <p class="group__note" id="model-note" hidden></p>
+          </section>
+
+          <section class="group">
+            <h3 class="group__title">Connection</h3>
+            <dl class="kv">
+              <div class="kv__row">
+                <dt class="kv__key">Active model</dt>
+                <dd class="kv__val" id="settings-model">detecting...</dd>
+              </div>
+              <div class="kv__row">
+                <dt class="kv__key">Endpoint</dt>
+                <dd class="kv__val" id="settings-endpoint">Token Harbor (from .env)</dd>
+              </div>
+              <div class="kv__row">
+                <dt class="kv__key">Stored conversations</dt>
+                <dd class="kv__val" id="settings-count">0</dd>
+              </div>
+            </dl>
+            <p class="group__note">
+              The API key is stored only in the Python backend. It is never sent to this page and never saved
+              in the browser.
+            </p>
+          </section>
+
+          <section class="group group--danger">
+            <h3 class="group__title">Data</h3>
+            <p class="group__note">Conversations are saved in this browser only (localStorage). No database is used.</p>
+            <button type="button" class="btn btn--danger-ghost" id="wipe-btn">
+              <span class="ic" data-icon="trash"></span>
+              <span>Delete all conversations</span>
+            </button>
+          </section>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- ====================================================================
+         CONFIRM DIALOG - used for delete and clear actions
+         ==================================================================== -->
+    <dialog id="confirm-dialog" class="modal modal--sm" aria-labelledby="confirm-title">
+      <form method="dialog" class="modal__card">
+        <header class="modal__head">
+          <div class="modal__headline">
+            <span class="modal__badge" data-icon="alert" aria-hidden="true"></span>
+            <h2 class="modal__title" id="confirm-title">Are you sure?</h2>
+          </div>
+        </header>
+        <div class="modal__body">
+          <p class="group__note" id="confirm-text"></p>
+        </div>
+        <footer class="modal__foot">
+          <button class="btn btn--quiet" type="submit" value="cancel">Cancel</button>
+          <button class="btn btn--danger" type="submit" value="ok" id="confirm-ok">Delete</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+    <script type="module" src="/static/js/app.js"></script>
+  </body>
+</html>

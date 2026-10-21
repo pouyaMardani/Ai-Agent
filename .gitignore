@@ -1,0 +1,9 @@
+# Local secrets - never commit this file
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/

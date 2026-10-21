@@ -1,0 +1,307 @@
+/* ==========================================================================
+   Token Harbor Chat - design tokens and themes
+   --------------------------------------------------------------------------
+   Everything visual is driven by the custom properties below. A theme is
+   nothing more than a set of overrides for these variables, which is why
+   adding a fifth theme only needs one extra block.
+   ========================================================================== */
+
+:root {
+  /* ---- geometry & rhythm ---- */
+  --radius-xs: 8px;
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 30px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 22px;
+  --space-6: 32px;
+
+  /* ---- layout ---- */
+  --sidebar-w: 296px;
+  --sidebar-w-collapsed: 84px;
+  --thread-max: 820px;
+  --blur: 20px;
+
+  /* ---- motion ---- */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 0.14s;
+  --dur: 0.24s;
+  --dur-slow: 0.45s;
+
+  /* ---- type ---- */
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Inter", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", "Fira Code", ui-monospace,
+    SFMono-Regular, Consolas, "Liberation Mono", monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.82rem;
+  --text-base: 0.95rem;
+  --text-lg: 1.05rem;
+  --text-xl: 1.35rem;
+  --text-hero: clamp(1.5rem, 1.1rem + 1.6vw, 2.1rem);
+}
+
+/* ==========================================================================
+   THEME 1 / Midnight Glass - deep navy with violet and blue accents
+   (also the default, so unknown theme values still look intentional)
+   ========================================================================== */
+:root,
+[data-theme="midnight"] {
+  color-scheme: dark;
+
+  --bg-deep: #05070f;
+  --bg-app: #080b16;
+  --glow-a: rgba(109, 94, 255, 0.5);
+  --glow-b: rgba(64, 140, 255, 0.4);
+  --glow-c: rgba(190, 92, 255, 0.3);
+  --mesh-line: rgba(150, 170, 255, 0.055);
+
+  --surface-glass: rgba(19, 24, 44, 0.58);
+  --surface-raised: rgba(30, 37, 64, 0.5);
+  --surface-soft: rgba(255, 255, 255, 0.05);
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --surface-solid: #0e1222;
+  --stroke: rgba(255, 255, 255, 0.085);
+  --stroke-strong: rgba(255, 255, 255, 0.16);
+
+  --text-1: #eef1ff;
+  --text-2: #b6bee0;
+  --text-3: #7d87b0;
+
+  --accent-1: #7c5cff;
+  --accent-2: #3fa9ff;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(124, 92, 255, 0.16);
+  --accent-ring: rgba(124, 92, 255, 0.55);
+  --accent-glow: rgba(109, 94, 255, 0.45);
+
+  --brand-1: #7c5cff;
+  --brand-2: #3fa9ff;
+
+  --user-bubble-bg: linear-gradient(135deg, #6d5cff 0%, #3f8dff 100%);
+  --user-bubble-ink: #ffffff;
+  --ai-bubble-bg: rgba(255, 255, 255, 0.045);
+  --ai-bubble-ink: var(--text-1);
+
+  --code-bg: rgba(6, 9, 20, 0.72);
+  --code-head: rgba(255, 255, 255, 0.045);
+  --code-ink: #dbe4ff;
+
+  --danger: #ff7a8a;
+  --danger-soft: rgba(255, 90, 110, 0.12);
+  --danger-ring: rgba(255, 90, 110, 0.4);
+  --ok: #4ade80;
+
+  --shadow-1: 0 1px 2px rgba(2, 4, 12, 0.4);
+  --shadow-2: 0 10px 30px -12px rgba(2, 4, 12, 0.7);
+  --shadow-3: 0 28px 60px -24px rgba(2, 4, 12, 0.85);
+  --inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+/* ==========================================================================
+   THEME 2 / Aurora - dark teal with emerald and cyan light
+   ========================================================================== */
+[data-theme="aurora"] {
+  color-scheme: dark;
+
+  --bg-deep: #03100e;
+  --bg-app: #041613;
+  --glow-a: rgba(24, 211, 154, 0.42);
+  --glow-b: rgba(49, 224, 216, 0.34);
+  --glow-c: rgba(10, 140, 120, 0.34);
+  --mesh-line: rgba(120, 255, 220, 0.05);
+
+  --surface-glass: rgba(8, 38, 34, 0.55);
+  --surface-raised: rgba(12, 56, 50, 0.48);
+  --surface-soft: rgba(255, 255, 255, 0.05);
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --surface-solid: #06201d;
+  --stroke: rgba(160, 255, 230, 0.1);
+  --stroke-strong: rgba(160, 255, 230, 0.2);
+
+  --text-1: #e7fff7;
+  --text-2: #a9d8cd;
+  --text-3: #6d9a92;
+
+  --accent-1: #14c78f;
+  --accent-2: #34d8d0;
+  --accent-ink: #012019;
+  --accent-soft: rgba(20, 199, 143, 0.16);
+  --accent-ring: rgba(52, 216, 208, 0.55);
+  --accent-glow: rgba(20, 199, 143, 0.4);
+
+  --brand-1: #14c78f;
+  --brand-2: #34d8d0;
+
+  --user-bubble-bg: linear-gradient(135deg, #10b981 0%, #22c9c2 100%);
+  --user-bubble-ink: #02201a;
+  --ai-bubble-bg: rgba(255, 255, 255, 0.045);
+  --ai-bubble-ink: var(--text-1);
+
+  --code-bg: rgba(2, 22, 20, 0.7);
+  --code-head: rgba(120, 255, 220, 0.06);
+  --code-ink: #d6fff2;
+
+  --danger: #ff8f8f;
+  --danger-soft: rgba(255, 90, 110, 0.13);
+  --danger-ring: rgba(255, 90, 110, 0.4);
+  --ok: #34d399;
+
+  --shadow-1: 0 1px 2px rgba(0, 20, 18, 0.45);
+  --shadow-2: 0 10px 30px -12px rgba(0, 25, 22, 0.7);
+  --shadow-3: 0 28px 60px -24px rgba(0, 25, 22, 0.85);
+  --inner-light: inset 0 1px 0 rgba(180, 255, 240, 0.08);
+}
+
+/* ==========================================================================
+   THEME 3 / Light Studio - bright, calm and soft, with real depth
+   ========================================================================== */
+[data-theme="studio"] {
+  color-scheme: light;
+
+  --bg-deep: #eef1f8;
+  --bg-app: #f7f9fd;
+  --glow-a: rgba(124, 116, 255, 0.28);
+  --glow-b: rgba(56, 160, 255, 0.24);
+  --glow-c: rgba(255, 138, 200, 0.2);
+  --mesh-line: rgba(24, 32, 70, 0.045);
+
+  --surface-glass: rgba(255, 255, 255, 0.72);
+  --surface-raised: rgba(255, 255, 255, 0.9);
+  --surface-soft: rgba(24, 32, 70, 0.045);
+  --surface-hover: rgba(24, 32, 70, 0.075);
+  --surface-solid: #ffffff;
+  --stroke: rgba(24, 32, 70, 0.1);
+  --stroke-strong: rgba(24, 32, 70, 0.2);
+
+  --text-1: #131830;
+  --text-2: #4a5478;
+  --text-3: #7b85a8;
+
+  --accent-1: #5b5bf5;
+  --accent-2: #0ea5e9;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(91, 91, 245, 0.1);
+  --accent-ring: rgba(91, 91, 245, 0.45);
+  --accent-glow: rgba(91, 91, 245, 0.28);
+
+  --brand-1: #5b5bf5;
+  --brand-2: #0ea5e9;
+
+  --user-bubble-bg: linear-gradient(135deg, #5b5bf5 0%, #0e93e9 100%);
+  --user-bubble-ink: #ffffff;
+  --ai-bubble-bg: rgba(255, 255, 255, 0.75);
+  --ai-bubble-ink: var(--text-1);
+
+  --code-bg: rgba(19, 24, 48, 0.055);
+  --code-head: rgba(19, 24, 48, 0.045);
+  --code-ink: #1b2145;
+
+  --danger: #d93b57;
+  --danger-soft: rgba(217, 59, 87, 0.09);
+  --danger-ring: rgba(217, 59, 87, 0.35);
+  --ok: #0f9d63;
+
+  --shadow-1: 0 1px 2px rgba(19, 24, 48, 0.06);
+  --shadow-2: 0 12px 28px -14px rgba(19, 24, 48, 0.28);
+  --shadow-3: 0 30px 60px -26px rgba(19, 24, 48, 0.35);
+  --inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+/* ==========================================================================
+   THEME 4 / Cyberpunk - near-black metal with magenta and cyan signals
+   ========================================================================== */
+[data-theme="cyberpunk"] {
+  color-scheme: dark;
+
+  --bg-deep: #050409;
+  --bg-app: #0a0714;
+  --glow-a: rgba(255, 46, 136, 0.4);
+  --glow-b: rgba(34, 211, 238, 0.34);
+  --glow-c: rgba(150, 60, 255, 0.3);
+  --mesh-line: rgba(255, 120, 200, 0.06);
+
+  --surface-glass: rgba(20, 12, 34, 0.6);
+  --surface-raised: rgba(38, 18, 56, 0.5);
+  --surface-soft: rgba(255, 255, 255, 0.05);
+  --surface-hover: rgba(255, 255, 255, 0.085);
+  --surface-solid: #100a1c;
+  --stroke: rgba(255, 150, 220, 0.12);
+  --stroke-strong: rgba(255, 150, 220, 0.24);
+
+  --text-1: #f4eaff;
+  --text-2: #c3aede;
+  --text-3: #8b7bab;
+
+  --accent-1: #ff2e88;
+  --accent-2: #22d3ee;
+  --accent-ink: #0b0410;
+  --accent-soft: rgba(255, 46, 136, 0.15);
+  --accent-ring: rgba(255, 46, 136, 0.5);
+  --accent-glow: rgba(255, 46, 136, 0.4);
+
+  --brand-1: #ff2e88;
+  --brand-2: #22d3ee;
+
+  --user-bubble-bg: linear-gradient(135deg, #ff2e88 0%, #a855f7 100%);
+  --user-bubble-ink: #ffffff;
+  --ai-bubble-bg: rgba(255, 255, 255, 0.045);
+  --ai-bubble-ink: var(--text-1);
+
+  --code-bg: rgba(4, 2, 10, 0.75);
+  --code-head: rgba(34, 211, 238, 0.07);
+  --code-ink: #d9f6ff;
+
+  --danger: #ff6b81;
+  --danger-soft: rgba(255, 60, 100, 0.13);
+  --danger-ring: rgba(255, 60, 100, 0.4);
+  --ok: #4ade80;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 10px 30px -12px rgba(90, 0, 60, 0.55);
+  --shadow-3: 0 28px 60px -24px rgba(90, 0, 60, 0.6);
+  --inner-light: inset 0 1px 0 rgba(255, 200, 245, 0.07);
+}
+
+/* A gentle "breath" of the ambient light while the theme changes, which
+   hides the unavoidable instant swap of gradient surfaces. */
+html.is-theme-shifting .ambient {
+  animation: theme-pulse 0.6s var(--ease-out) 1;
+}
+
+@keyframes theme-pulse {
+  0% {
+    filter: brightness(1);
+  }
+  45% {
+    filter: brightness(1.35) saturate(1.15);
+  }
+  100% {
+    filter: brightness(1);
+  }
+}
+
+/* Respect the operating system "reduce motion" setting: keep the app usable,
+   drop anything that moves on its own. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .ambient .orb {
+    animation: none !important;
+  }
+}

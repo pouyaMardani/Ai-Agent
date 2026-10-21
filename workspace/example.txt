@@ -1,0 +1,3 @@
+I am learning AI Engineering.
+My first tool is read_file.
+My next goal is to build an AI Agent.
