@@ -257,10 +257,15 @@ class ReadFileTests(WorkspaceTestCase):
 class ToolExecutionTests(WorkspaceTestCase):
     """execute_tool_call() is the only door between the model and the disk."""
 
-    def test_only_the_two_file_tools_are_whitelisted(self):
-        self.assertEqual(list(app.TOOL_FUNCTIONS), ["read_file", "write_file"])
+    def test_only_the_registered_tools_are_whitelisted(self):
+        # The registry is the only door between the model and the world, so it
+        # holds exactly the three tools this server implements.
         self.assertEqual(
-            [tool["function"]["name"] for tool in app.TOOLS], ["read_file", "write_file"]
+            list(app.TOOL_FUNCTIONS), ["read_file", "write_file", "web_search"]
+        )
+        self.assertEqual(
+            [tool["function"]["name"] for tool in app.TOOLS],
+            ["read_file", "write_file", "web_search"],
         )
 
     def test_schema_asks_for_one_required_path(self):
