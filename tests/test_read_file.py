@@ -259,13 +259,14 @@ class ToolExecutionTests(WorkspaceTestCase):
 
     def test_only_the_registered_tools_are_whitelisted(self):
         # The registry is the only door between the model and the world, so it
-        # holds exactly the three tools this server implements.
+        # holds exactly the four tools this server implements.
         self.assertEqual(
-            list(app.TOOL_FUNCTIONS), ["read_file", "write_file", "web_search"]
+            list(app.TOOL_FUNCTIONS),
+            ["read_file", "write_file", "web_search", "fetch_url"],
         )
         self.assertEqual(
             [tool["function"]["name"] for tool in app.TOOLS],
-            ["read_file", "write_file", "web_search"],
+            ["read_file", "write_file", "web_search", "fetch_url"],
         )
 
     def test_schema_asks_for_one_required_path(self):

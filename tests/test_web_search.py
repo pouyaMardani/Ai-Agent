@@ -261,7 +261,7 @@ class MissingKeyTests(SearchTestCase):
             self.assertIsNone(app.search_api_key())
             self.assertEqual(
                 [tool["function"]["name"] for tool in app.TOOLS],
-                ["read_file", "write_file", "web_search"],
+                ["read_file", "write_file", "web_search", "fetch_url"],
             )
 
 
@@ -414,7 +414,16 @@ class SearchSchemaTests(SearchTestCase):
         self.assertIn("untrusted", description)
 
     def test_only_the_registered_tools_can_run(self):
-        for name in ("search", "web_search_now", "fetch_url", "browse", "http_get", "read_url", ""):
+        for name in (
+            "search",
+            "web_search_now",
+            "fetch",
+            "open_url",
+            "browse",
+            "http_get",
+            "read_url",
+            "",
+        ):
             with self.subTest(name=name):
                 result = app.execute_tool_call(name, '{"query": "anything"}')
                 self.assertFalse(result["ok"])
