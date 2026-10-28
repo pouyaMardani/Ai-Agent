@@ -1,25 +1,7 @@
-/**
- * A tiny, dependency-free Markdown renderer with sanitising built in.
- *
- * How the safety works:
- *  1. All text coming from the AI is HTML-escaped FIRST (&, <, >, ", ').
- *  2. Only then are Markdown markers converted into tags, and the only tags
- *     this file can ever produce are the ones written below by hand.
- *  3. Link targets must match a whitelist of safe schemes, so
- *     `[click](javascript:...)` becomes plain text instead of a script link.
- *
- * Because of step 1 and 2, a reply such as
- *   `<img src=x onerror=alert(1)>`
- * is displayed as visible text and can never become a real element.
- *
- * Supported: headings, bold, italics, strikethrough, inline code, fenced code
- * blocks, ordered/unordered (and nested) lists, blockquotes, tables,
- * horizontal rules, links and bare URLs.
- */
+
 
 const TOKEN = "\u0000";
 
-/** Escape every character that could start HTML markup or break an attribute. */
 export function escapeHtml(value) {
   return String(value === null || value === undefined ? "" : value)
     .replace(/&/g, "&amp;")
@@ -29,12 +11,6 @@ export function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-/**
- * Whitelist of link targets. `//host` (protocol relative) is rejected on
- * purpose, and the host part is required for http(s) links.
- * Expects text that has already been escaped by escapeHtml().
- * @returns {string|null} a safe href, or null when the URL must be ignored
- */
 export function safeHref(url) {
   const cleaned = String(url === null || url === undefined ? "" : url)
     .trim()
@@ -46,13 +22,11 @@ export function safeHref(url) {
   return cleaned;
 }
 
-/** Escape and let the safety rules above run exactly once per value. */
 function safeLangClass(lang) {
   const clean = String(lang || "").replace(/[^a-z0-9+#._-]/gi, "");
   return clean ? ' class="language-' + clean + '"' : "";
 }
 
-/** Hide already-rendered HTML behind a token so later rules cannot touch it. */
 function stash(tokens, html) {
   tokens.push(html);
   return TOKEN + (tokens.length - 1) + TOKEN;
@@ -64,7 +38,6 @@ function restore(text, tokens) {
   });
 }
 
-/** A bare URL, cut free of trailing sentence punctuation. */
 function autoLink(url, tokens) {
   const trimmed = url.replace(/[.,;:!?]+$/, "");
   const rest = url.slice(trimmed.length);
@@ -78,22 +51,17 @@ function autoLink(url, tokens) {
   );
 }
 
-/**
- * Inline rules: code spans, links, bold, italics, strikethrough, bare URLs.
- * @param {string} escaped text that already went through escapeHtml()
- */
 export function renderInline(escaped) {
   const tokens = [];
   let text = String(escaped === null || escaped === undefined ? "" : escaped);
 
-  // Code spans and links first: their contents must stay untouched.
   text = text.replace(/`([^`\n]+)`/g, function (match, code) {
     return stash(tokens, "<code>" + code + "</code>");
   });
 
   text = text.replace(/\[([^\]\n]{1,400})\]\(([^()\s]+)\)/g, function (match, label, url) {
     const href = safeHref(url);
-    if (!href) return label; // unsafe scheme: show the label as plain text
+    if (!href) return label;
     return stash(
       tokens,
       '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + label + "</a>"
@@ -110,7 +78,6 @@ export function renderInline(escaped) {
   return restore(text, tokens);
 }
 
-/** One fenced code block, with a language label and a copy button. */
 function codeBlock(code, lang) {
   return (
     '<div class="code-block">' +
@@ -145,7 +112,6 @@ function splitRow(line) {
     .map((cell) => cell.trim());
 }
 
-/** True when a line must not be swallowed by the paragraph above it. */
 function startsBlock(lines, index) {
   const line = lines[index];
   if (/^\s*(`{3,}|~{3,})/.test(line)) return true;
@@ -157,10 +123,6 @@ function startsBlock(lines, index) {
   return false;
 }
 
-/**
- * Read a list, honouring one level of indentation for nested items.
- * @returns {{ html: string, next: number }} markup and the first unused line
- */
 function renderList(lines, start, indent) {
   const first = lines[start].match(LIST_MARKER);
   const ordered = /\d/.test(first[2]);
@@ -171,7 +133,6 @@ function renderList(lines, start, indent) {
     const match = lines[i].match(LIST_MARKER);
 
     if (!match) {
-      // A wrapped continuation line belongs to the previous item.
       if (items.length > 0 && /^\s+\S/.test(lines[i])) {
         items[items.length - 1] += " " + renderInline(escapeHtml(lines[i].trim()));
         i += 1;
@@ -191,7 +152,7 @@ function renderList(lines, start, indent) {
       continue;
     }
 
-    if (/\d/.test(match[2]) !== ordered) break; // a different list starts here
+    if (/\d/.test(match[2]) !== ordered) break;
     items.push(renderInline(escapeHtml(match[3])));
     i += 1;
   }
@@ -201,13 +162,6 @@ function renderList(lines, start, indent) {
   return { html: "<" + tag + ">" + body + "</" + tag + ">", next: i };
 }
 
-/**
- * Render a Markdown string into sanitised HTML.
- * Every branch below is a hand-written tag; nothing from the input can
- * introduce an element of its own.
- * @param {string} source raw text from the AI (or from the user)
- * @returns {string} safe HTML string
- */
 export function renderMarkdown(source) {
   const text = String(source === null || source === undefined ? "" : source).replace(/\r\n?/g, "\n");
   const lines = text.split("\n");
@@ -217,7 +171,6 @@ export function renderMarkdown(source) {
   while (i < lines.length) {
     const line = lines[i];
 
-    // ---- fenced code block -------------------------------------------------
     const fence = line.match(/^\s*(`{3,}|~{3,})\s*([A-Za-z0-9+#._-]*)\s*$/);
     if (fence) {
       const marker = fence[1].charAt(0);
@@ -228,7 +181,7 @@ export function renderMarkdown(source) {
         body.push(lines[i]);
         i += 1;
       }
-      i += 1; // step over the closing fence (or off the end of the message)
+      i += 1;
       out.push(codeBlock(body.join("\n"), fence[2]));
       continue;
     }
@@ -238,24 +191,20 @@ export function renderMarkdown(source) {
       continue;
     }
 
-    // ---- heading ----------------------------------------------------------
     const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
     if (heading) {
-      // The page already has an <h1> in the top bar, so replies start at <h2>.
       const level = Math.min(heading[1].length + 1, 4);
       out.push("<h" + level + ">" + renderInline(escapeHtml(heading[2])) + "</h" + level + ">");
       i += 1;
       continue;
     }
 
-    // ---- horizontal rule --------------------------------------------------
     if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
       out.push("<hr />");
       i += 1;
       continue;
     }
 
-    // ---- blockquote -------------------------------------------------------
     if (/^\s*>\s?/.test(line)) {
       const quoted = [];
       while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
@@ -266,7 +215,6 @@ export function renderMarkdown(source) {
       continue;
     }
 
-    // ---- list -------------------------------------------------------------
     const listStart = line.match(LIST_MARKER);
     if (listStart) {
       const list = renderList(lines, i, listStart[1].length);
@@ -275,7 +223,6 @@ export function renderMarkdown(source) {
       continue;
     }
 
-    // ---- table ------------------------------------------------------------
     if (line.includes("|") && i + 1 < lines.length && separatorRow(lines[i + 1])) {
       const head = splitRow(line);
       const rows = [];
@@ -296,14 +243,13 @@ export function renderMarkdown(source) {
       continue;
     }
 
-    // ---- paragraph --------------------------------------------------------
     const paragraph = [];
     while (i < lines.length && lines[i].trim() && !startsBlock(lines, i)) {
       paragraph.push(lines[i]);
       i += 1;
     }
     if (paragraph.length === 0) {
-      i += 1; // safety net: never loop forever on an unexpected line
+      i += 1;
       continue;
     }
     out.push("<p>" + renderInline(escapeHtml(paragraph.join("\n"))).replace(/\n/g, "<br />") + "</p>");

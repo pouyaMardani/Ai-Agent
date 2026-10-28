@@ -1,14 +1,4 @@
-/**
- * Inline SVG icon set.
- *
- * Why inline SVG instead of an icon font or a CDN library?
- *  - no network request, so the interface works fully offline;
- *  - the icons inherit `currentColor`, so they follow the active theme;
- *  - `stroke-width` and caps stay consistent because every icon shares the
- *    same 24x24 viewBox and stroke settings.
- *
- * Every entry is the *inner* markup of an <svg> element.
- */
+
 
 const ICONS = {
   plus: '<path d="M12 5v14M5 12h14" />',
@@ -55,18 +45,10 @@ const ICONS = {
   code: '<path d="M9 8.5 4.5 12 9 15.5" /><path d="M15 8.5 19.5 12 15 15.5" />',
 };
 
-/** Icons that get an extra filled detail instead of pure strokes. */
-const FILLED_ICONS = { sparkle: true };
-
-/**
- * Build the markup for one icon.
- * @param {string} name key inside ICONS
- * @returns {string} an <svg> element as a string (empty when unknown)
- */
 export function iconMarkup(name) {
   const body = ICONS[name];
   if (!body) return "";
-  if (FILLED_ICONS[name] === true) {
+  if (name === "sparkle") {
     return (
       '<svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" ' +
       'fill="currentColor" stroke="none">' +
@@ -82,16 +64,6 @@ export function iconMarkup(name) {
   );
 }
 
-/** Names that exist, handy for debugging. */
-export function iconNames() {
-  return Object.keys(ICONS);
-}
-
-/**
- * Put the SVG inside every element that asks for one, e.g.
- * `<button data-icon="copy"></button>` -> button containing the copy icon.
- * Elements already containing an <svg> are skipped, so calling this twice is safe.
- */
 export function hydrateIcons(root = document) {
   root.querySelectorAll("[data-icon]").forEach((el) => {
     if (el.querySelector("svg")) return;

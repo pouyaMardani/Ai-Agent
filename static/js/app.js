@@ -1,20 +1,4 @@
-/**
- * Token Harbor Chat - front end.
- *
- * Structure of this file:
- *   1. configuration (themes, prompt suggestions)
- *   2. element lookups
- *   3. state + storage
- *   4. small helpers (time, toasts, clipboard, confirm dialog)
- *   5. rendering (sidebar, thread, empty state, messages)
- *   6. API call
- *   7. actions (send, regenerate, retry, rename, delete, clear)
- *   8. wiring + start-up
- *
- * The backend keeps the API key; this file only ever sends
- * { message, history, model } to POST /api/chat and shows the text it gets
- * back. The model is the one picked in Settings (or the backend default).
- */
+
 
 import { hydrateIcons, iconMarkup } from "./icons.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
@@ -22,22 +6,17 @@ import {
   LIMITS,
   deriveTitle,
   makeConversation,
-  readModel,
   readSidebarState,
   readState,
   readTheme,
   resolveStorage,
   sortConversations,
   uid,
-  writeModel,
   writeSidebarState,
   writeState,
   writeTheme,
 } from "./store.js";
 
-/* ----------------------------------------------------------- configuration */
-
-/** The four themes. Keep the ids in step with theme-boot.js and style.css. */
 const THEMES = [
   {
     id: "midnight",
@@ -65,7 +44,6 @@ const THEMES = [
   },
 ];
 
-/** Cards shown on an empty conversation. Clicking one fills the composer. */
 const SUGGESTIONS = [
   {
     icon: "sparkle",
@@ -90,8 +68,6 @@ const SUGGESTIONS = [
   },
 ];
 
-/* ------------------------------------------------------------ element refs */
-
 const el = {
   root: document.documentElement,
   sidebar: document.getElementById("sidebar"),
@@ -108,8 +84,6 @@ const el = {
   statusText: document.getElementById("status-text"),
   title: document.getElementById("chat-title"),
   meta: document.getElementById("chat-meta"),
-  modelPill: document.getElementById("model-pill"),
-  modelName: document.getElementById("model-name"),
   clearBtn: document.getElementById("clear-btn"),
   thread: document.getElementById("thread"),
   threadInner: document.getElementById("thread-inner"),
@@ -121,9 +95,6 @@ const el = {
   srStatus: document.getElementById("sr-status"),
   settingsDialog: document.getElementById("settings-dialog"),
   themeGrid: document.getElementById("theme-grid"),
-  modelGrid: document.getElementById("model-grid"),
-  modelNote: document.getElementById("model-note"),
-  settingsModel: document.getElementById("settings-model"),
   settingsCount: document.getElementById("settings-count"),
   wipe: document.getElementById("wipe-btn"),
   confirmDialog: document.getElementById("confirm-dialog"),
@@ -133,33 +104,24 @@ const el = {
   toasts: document.getElementById("toasts"),
 };
 
-/* ---------------------------------------------------------- state + setup */
-
 const storage = resolveStorage();
 let state = readState(storage);
 
 const ui = {
-  busy: false, // a request is in flight -> sending is blocked
-  pendingId: null, // conversation waiting for a reply
-  editingId: null, // conversation being renamed
-  query: "", // sidebar search text
-  models: [], // [{ id, label }] offered by the backend
-  model: null, // model id the user picked (saved in this browser)
-  defaultModel: null, // backend default, used when nothing is saved
-  backendOk: false,
+  busy: false,
+  pendingId: null,
+  editingId: null,
+  query: "",
 };
 
-/** The conversation that is currently on screen. */
 function activeConversation() {
   return state.conversations.find((conversation) => conversation.id === state.activeId) || null;
 }
 
-/** Persist the whole state (conversations, active chat, sizes are capped). */
 function persist() {
   writeState(storage, state);
 }
 
-/** `2m ago`, `3h ago`, `5d ago`, or a date for anything older. */
 function formatWhen(timestamp) {
   const diff = Date.now() - Number(timestamp || 0);
   const minute = 60000;
@@ -172,20 +134,14 @@ function formatWhen(timestamp) {
   return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-/** Clock time for the message header. */
 function formatClock(timestamp) {
   return new Date(timestamp).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Themes that expect light form controls and light browser chrome. */
-const LIGHT_THEMES = new Set(["studio"]);
-
-/** Announce a change to screen readers without re-rendering the whole thread. */
 function announce(text) {
   el.srStatus.textContent = text;
 }
 
-/** Small transient message in the corner. Text only, never markup. */
 function toast(message, kind = "info") {
   const node = document.createElement("div");
   node.className = "toast toast--" + kind;
@@ -209,10 +165,6 @@ function prefersReducedMotion() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-/**
- * Copy text with a fallback for browsers where the async clipboard API is
- * unavailable. Returns true when something landed on the clipboard.
- */
 async function copyText(text) {
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -220,7 +172,7 @@ async function copyText(text) {
       return true;
     }
   } catch (error) {
-    /* fall through to the older approach below */
+
   }
 
   try {
@@ -240,11 +192,6 @@ async function copyText(text) {
   }
 }
 
-/**
- * Promise-based confirmation built on <dialog>, so Escape and the focus trap
- * come from the browser instead of hand-written code.
- * @returns {Promise<boolean>} true when the user confirmed
- */
 function showConfirm(options) {
   return new Promise((resolve) => {
     el.confirmTitle.textContent = options.title || "Are you sure?";
@@ -257,10 +204,7 @@ function showConfirm(options) {
       resolve(el.confirmDialog.returnValue === "ok");
     };
 
-    // A <dialog> remembers its last returnValue, and closing with Escape does
-    // not reset it. Starting every round from "cancel" means Escape (or the X)
-    // can never be mistaken for a confirmation.
-    el.confirmDialog.returnValue = "cancel";
+el.confirmDialog.returnValue = "cancel";
     if (el.confirmDialog.open) el.confirmDialog.close();
 
     el.confirmDialog.addEventListener("close", finish);
@@ -268,15 +212,10 @@ function showConfirm(options) {
   });
 }
 
-/** Reflect the backend/model state in the sidebar and the top bar. */
 function setBackendStatus(ok, text) {
-  ui.backendOk = ok;
   el.statusDot.className = "status-dot" + (ok ? " is-ok" : " is-bad");
   el.statusText.textContent = text;
-  el.modelPill.classList.toggle("is-offline", !ok);
 }
-
-/* --------------------------------------------------------------- themes */
 
 function renderThemeGrid() {
   el.themeGrid.innerHTML = THEMES.map((theme) => {
@@ -309,7 +248,6 @@ function renderThemeGrid() {
   }).join("");
 }
 
-/** Apply a theme, remember it, and update the radio group. */
 function applyTheme(id, options = {}) {
   const theme = THEMES.find((item) => item.id === id) || THEMES[0];
   const changed = el.root.getAttribute("data-theme") !== theme.id;
@@ -318,7 +256,7 @@ function applyTheme(id, options = {}) {
   writeTheme(storage, theme.id);
 
   const schemeMeta = document.querySelector('meta[name="color-scheme"]');
-  if (schemeMeta) schemeMeta.setAttribute("content", LIGHT_THEMES.has(theme.id) ? "light" : "dark");
+  if (schemeMeta) schemeMeta.setAttribute("content", theme.id === "studio" ? "light" : "dark");
 
   el.themeGrid.querySelectorAll("[data-theme-option]").forEach((node) => {
     const selected = node.dataset.themeOption === theme.id;
@@ -327,152 +265,11 @@ function applyTheme(id, options = {}) {
     if (input) input.checked = selected;
   });
 
-  // A short pulse of the ambient light hides the instant gradient swap.
   if (changed && options.animate !== false && !prefersReducedMotion()) {
     el.root.classList.add("is-theme-shifting");
     window.setTimeout(() => el.root.classList.remove("is-theme-shifting"), 640);
   }
 }
-
-/* --------------------------------------------------------------- models */
-
-/** Read {"id", "label"} pairs from /api/config, dropping anything malformed. */
-function normaliseModels(raw) {
-  if (!Array.isArray(raw)) return [];
-  const seen = new Set();
-  const models = [];
-  raw.forEach((item) => {
-    if (!item || typeof item !== "object") return;
-    const id = typeof item.id === "string" ? item.id.trim() : "";
-    if (!id || seen.has(id)) return;
-    const label = typeof item.label === "string" && item.label.trim() ? item.label.trim() : id;
-    seen.add(id);
-    models.push({ id, label });
-  });
-  return models;
-}
-
-/** The configured model with this id, or null when it is not offered. */
-function modelById(id) {
-  if (!id) return null;
-  return ui.models.find((item) => item.id === id) || null;
-}
-
-/** The model that will answer: the saved pick, else the backend default. */
-function effectiveModel() {
-  return modelById(ui.model) || modelById(ui.defaultModel) || ui.models[0] || null;
-}
-
-/** Two letters for the badge on a model card: "MiMo v2.6" -> "MI". */
-function modelBadge(label) {
-  const firstWord = String(label || "").trim().split(/\s+/)[0] || "";
-  const letters = firstWord.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
-  return letters || "AI";
-}
-
-/** Explain the model group while the list cannot be used (yet). */
-function renderModelPlaceholder(text) {
-  el.modelGrid.innerHTML = '<p class="model-grid__empty">' + escapeHtml(text) + "</p>";
-  el.modelNote.hidden = true;
-}
-
-/** One radio card per model the backend offers. */
-function renderModelGrid() {
-  if (!ui.models.length) {
-    renderModelPlaceholder(
-      "No model is configured. Add DEEPSEEK and MIMO to the .env file, then restart the server."
-    );
-    return;
-  }
-
-  el.modelGrid.innerHTML = ui.models
-    .map((model) => {
-      const id = escapeHtml(model.id);
-      return (
-        '<label class="theme-option" data-model-option="' +
-        id +
-        '">' +
-        '<input class="sr-only" type="radio" name="model" value="' +
-        id +
-        '" />' +
-        '<span class="model-option__badge" aria-hidden="true">' +
-        escapeHtml(modelBadge(model.label)) +
-        "</span>" +
-        '<span class="theme-option__text">' +
-        '<span class="theme-option__name">' +
-        escapeHtml(model.label) +
-        "</span>" +
-        '<span class="theme-option__note">' +
-        id +
-        "</span>" +
-        "</span>" +
-        '<span class="theme-option__check" aria-hidden="true">' +
-        iconMarkup("check") +
-        "</span>" +
-        "</label>"
-      );
-    })
-    .join("");
-}
-
-/** Tick the active card, and explain a saved model the backend no longer has. */
-function syncModelGrid() {
-  const active = effectiveModel();
-  const saved = modelById(ui.model);
-
-  el.modelGrid.querySelectorAll("[data-model-option]").forEach((node) => {
-    const selected = Boolean(active) && node.dataset.modelOption === active.id;
-    node.classList.toggle("is-selected", selected);
-    const input = node.querySelector("input");
-    if (input) input.checked = selected;
-  });
-
-  if (ui.model && !saved && active) {
-    el.modelNote.textContent =
-      "The model saved in this browser (" +
-      ui.model +
-      ") is not offered by the server any more, so " +
-      active.label +
-      " is used instead.";
-    el.modelNote.hidden = false;
-  } else {
-    el.modelNote.hidden = true;
-  }
-}
-
-/** Show the active model in the top-bar pill and in the Connection list. */
-function updateModelUi() {
-  const active = effectiveModel();
-
-  if (!ui.backendOk) {
-    el.modelName.textContent = "offline";
-    el.settingsModel.textContent = "unavailable";
-    el.modelPill.title = "The Python backend is unreachable";
-    return;
-  }
-
-  el.modelName.textContent = active ? active.label : "not set";
-  el.settingsModel.textContent = active ? active.id : "not set in .env";
-  el.modelPill.title = active
-    ? "Model: " + active.id + " - click to change it in Settings"
-    : "No model configured yet";
-}
-
-/** Use the model the user picked; the choice is remembered in this browser. */
-function applyModel(id, options = {}) {
-  const model = modelById(id);
-  if (!model) return; // only ids the backend offers can be selected
-
-  const changed = ui.model !== model.id;
-  ui.model = model.id;
-  writeModel(storage, model.id);
-
-  syncModelGrid();
-  updateModelUi();
-  if (changed && options.notify !== false) toast("Model set to " + model.label, "info");
-}
-
-/* --------------------------------------------------------------- scroll */
 
 function isNearBottom() {
   const distance = el.thread.scrollHeight - el.thread.scrollTop - el.thread.clientHeight;
@@ -484,29 +281,23 @@ function scrollThreadToBottom(behavior = "smooth") {
   el.thread.scrollTo({ top: el.thread.scrollHeight, behavior });
 }
 
-/** Show the "jump to latest" button only when the newest message is off screen. */
 function updateScrollButton() {
   const conversation = activeConversation();
   const hasMessages = Boolean(conversation && conversation.messages.length);
   el.scrollBottom.hidden = !hasMessages || isNearBottom();
 }
 
-/* ------------------------------------------------------------ rendering */
-
-/** First letter of a title, used for the small square badge. */
 function monogram(title) {
   const first = String(title || "").trim().charAt(0);
   return first ? first.toUpperCase() : "#";
 }
 
-/** "3 messages . 2m ago" - shown under each sidebar title. */
 function conversationMeta(conversation) {
   const count = conversation.messages.length;
   const label = count === 0 ? "empty" : count === 1 ? "1 message" : count + " messages";
   return formatWhen(conversation.updatedAt) + " \u00B7 " + label;
 }
 
-/** One sidebar row: a main button plus rename and delete actions. */
 function conversationRow(conversation) {
   const item = document.createElement("li");
   item.className = "conv";
@@ -566,8 +357,7 @@ function conversationRow(conversation) {
   actions.append(rename, remove);
   item.append(main, actions);
 
-  // Rename mode swaps the row for a text field (Enter saves, Escape cancels).
-  if (conversation.id === ui.editingId) {
+if (conversation.id === ui.editingId) {
     const input = document.createElement("input");
     input.type = "text";
     input.className = "conv__input";
@@ -581,7 +371,6 @@ function conversationRow(conversation) {
   return item;
 }
 
-/** Conversations matching the search box, newest first. */
 function visibleConversations() {
   const query = ui.query.trim().toLowerCase();
   const sorted = sortConversations(state.conversations);
@@ -607,7 +396,6 @@ function renderConversations() {
   el.settingsCount.textContent = String(state.conversations.length);
 }
 
-/** Title, subtitle and page title of the top bar. */
 function renderTopbar() {
   const conversation = activeConversation();
   const title = conversation ? conversation.title : "New chat";
@@ -623,7 +411,6 @@ function renderTopbar() {
   }
 }
 
-/** Hero + suggested prompts for a conversation with no messages. */
 function renderEmptyState() {
   const wrap = document.createElement("div");
   wrap.className = "empty";
@@ -674,7 +461,6 @@ function renderEmptyState() {
   return wrap;
 }
 
-/** Copy for every answer, plus Regenerate on the newest one. */
 function messageActions(isLast) {
   const actions = document.createElement("div");
   actions.className = "msg__actions";
@@ -700,7 +486,6 @@ function messageActions(isLast) {
   return actions;
 }
 
-/** One message row: assistant panel with markdown, or a user bubble. */
 function renderMessage(conversation, message, index) {
   const row = document.createElement("article");
   row.className = "msg msg--" + message.role;
@@ -711,7 +496,7 @@ function renderMessage(conversation, message, index) {
   if (message.role === "user") {
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    // textContent: the user's own words stay literal text, never markup
+
     bubble.textContent = message.content;
     row.appendChild(bubble);
     return row;
@@ -755,7 +540,7 @@ function renderMessage(conversation, message, index) {
   } else {
     const panel = document.createElement("div");
     panel.className = "msg__panel md";
-    panel.innerHTML = renderMarkdown(message.content); // sanitised by markdown.js
+    panel.innerHTML = renderMarkdown(message.content);
     body.append(panel, messageActions(isLast));
   }
 
@@ -763,7 +548,6 @@ function renderMessage(conversation, message, index) {
   return row;
 }
 
-/** "Token Harbor is thinking" row with three animated dots. */
 function renderTyping() {
   const row = document.createElement("div");
   row.className = "msg msg--assistant";
@@ -787,10 +571,6 @@ function renderTyping() {
   return row;
 }
 
-/**
- * Paint the thread for the active conversation.
- * @param {{scroll?: "bottom"|"smooth"|"preserve"}} options
- */
 function renderThread(options = {}) {
   const conversation = activeConversation();
   const previousScroll = el.thread.scrollTop;
@@ -810,8 +590,7 @@ function renderThread(options = {}) {
   if (waiting) el.threadInner.appendChild(renderTyping());
   el.thread.setAttribute("aria-busy", waiting ? "true" : "false");
 
-  // Elements built with `dataset.icon` get their SVG here.
-  hydrateIcons(el.threadInner);
+hydrateIcons(el.threadInner);
 
   if (mode === "preserve") el.thread.scrollTop = previousScroll;
   else if (mode === "smooth") scrollThreadToBottom("smooth");
@@ -820,28 +599,22 @@ function renderThread(options = {}) {
   updateScrollButton();
 }
 
-/** Repaint the sidebar, the top bar and the thread in one go. */
 function renderAll(options = {}) {
   renderConversations();
   renderTopbar();
   renderThread(options);
 }
 
-/* -------------------------------------------------------------- composer */
-
-/** Grow the textarea with its content, up to the CSS max-height. */
 function autoGrow() {
   el.input.style.height = "auto";
   el.input.style.height = Math.min(el.input.scrollHeight, 220) + "px";
 }
 
-/** Character counter - hidden while the box is empty so it stays quiet. */
 function updateCounter() {
   const length = el.input.value.length;
   el.counter.textContent = length === 0 ? "" : length.toLocaleString() + " characters";
 }
 
-/** Block a second send and show the spinner while a request is running. */
 function setBusy(busy) {
   ui.busy = busy;
   el.send.disabled = busy;
@@ -854,13 +627,6 @@ function focusComposer() {
   el.input.focus();
 }
 
-/* ----------------------------------------------------------------- the API */
-
-/**
- * History payload for one conversation, ending just before `userIndex`.
- * The newest user message travels separately because the backend appends it
- * last, and only the last 40 valid entries are sent (same cap as the server).
- */
 function historyPayload(conversation, userIndex) {
   return conversation.messages
     .slice(0, userIndex)
@@ -869,10 +635,6 @@ function historyPayload(conversation, userIndex) {
     .map((item) => ({ role: item.role, content: item.content }));
 }
 
-/**
- * Ask the backend for a reply to messages[userIndex] and store the answer.
- * Errors become a friendly assistant message with a Retry action.
- */
 async function requestReply(conversationId, userIndex) {
   const conversation = state.conversations.find((item) => item.id === conversationId);
   const userMessage = conversation ? conversation.messages[userIndex] : null;
@@ -894,8 +656,6 @@ async function requestReply(conversationId, userIndex) {
       body: JSON.stringify({
         message: userMessage.content,
         history: historyPayload(conversation, userIndex),
-        // The model chosen in Settings; "" lets the server use its default.
-        model: ui.model || "",
       }),
     });
 
@@ -903,7 +663,7 @@ async function requestReply(conversationId, userIndex) {
     try {
       data = await response.json();
     } catch (error) {
-      data = null; // an empty or non-JSON body is treated as a failure below
+      data = null;
     }
 
     if (!response.ok) {
@@ -917,9 +677,7 @@ async function requestReply(conversationId, userIndex) {
     failure = error && error.message ? error.message : "Something went wrong. Please try again.";
   }
 
-  // The answer belongs to the conversation that asked for it, even if the
-  // user switched chats while it was loading.
-  const target = state.conversations.find((item) => item.id === conversationId);
+const target = state.conversations.find((item) => item.id === conversationId);
   if (target) {
     if (failure) {
       target.messages.push({
@@ -946,13 +704,10 @@ async function requestReply(conversationId, userIndex) {
   focusComposer();
 }
 
-/* ---------------------------------------------------------------- actions */
-
-/** Send whatever is in the composer (Enter or the send button). */
 async function sendMessage() {
   const conversation = activeConversation();
   const text = el.input.value.trim();
-  if (!conversation || ui.busy || !text) return; // no empty sends, no double sends
+  if (!conversation || ui.busy || !text) return;
 
   el.input.value = "";
   autoGrow();
@@ -961,8 +716,7 @@ async function sendMessage() {
   const userMessage = { id: uid("m"), role: "user", content: text, at: Date.now() };
   conversation.messages.push(userMessage);
 
-  // The first user message becomes the conversation title.
-  const isFirstTurn = conversation.messages.filter((message) => message.role === "user").length === 1;
+const isFirstTurn = conversation.messages.filter((message) => message.role === "user").length === 1;
   if (isFirstTurn) conversation.title = deriveTitle(text);
   conversation.updatedAt = userMessage.at;
   persist();
@@ -971,7 +725,6 @@ async function sendMessage() {
   await requestReply(conversation.id, conversation.messages.length - 1);
 }
 
-/** New chat. An existing empty chat is reused instead of piling up blanks. */
 function newChat() {
   const emptyChat = state.conversations.find((conversation) => conversation.messages.length === 0);
   let conversation = emptyChat;
@@ -991,7 +744,6 @@ function newChat() {
   focusComposer();
 }
 
-/** Show another conversation. */
 function selectConversation(id) {
   if (state.activeId !== id) {
     state.activeId = id;
@@ -1002,7 +754,6 @@ function selectConversation(id) {
   closeDrawer();
 }
 
-/** Rename mode: swap the row for a text field. */
 function startRename(id) {
   ui.editingId = id;
   renderConversations();
@@ -1013,7 +764,6 @@ function startRename(id) {
   }
 }
 
-/** Save a new title (empty input keeps the old one). */
 function commitRename(id, value) {
   const conversation = state.conversations.find((item) => item.id === id);
   const title = value.trim().slice(0, 80);
@@ -1032,7 +782,6 @@ function cancelRename() {
   renderConversations();
 }
 
-/** Delete one conversation after a confirmation. */
 async function deleteConversation(id) {
   const conversation = state.conversations.find((item) => item.id === id);
   if (!conversation) return;
@@ -1056,7 +805,6 @@ async function deleteConversation(id) {
   toast("Conversation deleted");
 }
 
-/** Clear only the active conversation (its title stays). */
 async function clearConversation() {
   const conversation = activeConversation();
   if (!conversation) return;
@@ -1081,7 +829,6 @@ async function clearConversation() {
   toast("Conversation cleared");
 }
 
-/** Delete every conversation stored in this browser. */
 async function wipeAllConversations() {
   const ok = await showConfirm({
     title: "Delete all conversations?",
@@ -1101,11 +848,6 @@ async function wipeAllConversations() {
   toast("All conversations deleted");
 }
 
-/**
- * Drop the newest answer and ask again - used by both Regenerate and Retry,
- * because in both cases the user message is already the last one after the
- * answer (or error message) is removed.
- */
 async function rerunLastTurn() {
   const conversation = activeConversation();
   if (!conversation || ui.busy) return;
@@ -1126,9 +868,6 @@ async function rerunLastTurn() {
   await requestReply(conversation.id, userIndex);
 }
 
-/* ---------------------------------------------------------- sidebar shell */
-
-/** Slide the drawer in (small screens only). */
 function openDrawer() {
   if (!window.matchMedia("(max-width: 900px)").matches) return;
   el.root.setAttribute("data-drawer", "open");
@@ -1153,7 +892,6 @@ function updateCollapseButton() {
   el.collapse.title = label;
 }
 
-/** Desktop: switch between the wide sidebar and the icons-only rail. */
 function toggleSidebar() {
   const collapsed = el.root.getAttribute("data-sidebar") === "collapsed";
   const next = collapsed ? "expanded" : "collapsed";
@@ -1162,9 +900,6 @@ function toggleSidebar() {
   updateCollapseButton();
 }
 
-/* ------------------------------------------------------- event delegation */
-
-/** Sidebar rows: open, rename or delete. */
 function onConversationListClick(event) {
   const row = event.target.closest(".conv");
   if (!row) return;
@@ -1176,7 +911,6 @@ function onConversationListClick(event) {
   else if (name === "delete") deleteConversation(row.dataset.id);
 }
 
-/** Enter saves a rename, Escape throws it away. */
 function onConversationListKeydown(event) {
   const input = event.target.closest('[data-action="rename-input"]');
   if (!input) return;
@@ -1192,7 +926,6 @@ function onConversationListKeydown(event) {
   }
 }
 
-/** Clicking away also saves the new title. */
 function onConversationListFocusOut(event) {
   const input = event.target.closest('[data-action="rename-input"]');
   if (!input) return;
@@ -1201,7 +934,6 @@ function onConversationListFocusOut(event) {
   if (ui.editingId === row.dataset.id) commitRename(row.dataset.id, input.value);
 }
 
-/** Briefly swap a button label to confirm a copy. */
 function markActionDone(button, label) {
   const text = button.querySelector("span");
   if (!text) return;
@@ -1214,7 +946,6 @@ function markActionDone(button, label) {
   }, 1600);
 }
 
-/** Suggested prompt, Copy, Regenerate and Retry inside the thread. */
 async function onThreadClick(event) {
   const trigger = event.target.closest("[data-action]");
   if (!trigger) return;
@@ -1248,7 +979,6 @@ async function onThreadClick(event) {
   }
 }
 
-/** Copy buttons inside rendered code blocks. */
 async function onThreadCopyCode(event) {
   const button = event.target.closest("[data-copy-code]");
   if (!button) return;
@@ -1261,7 +991,6 @@ async function onThreadCopyCode(event) {
   toast(ok ? "Code copied" : "Copying is blocked by the browser", ok ? "info" : "error");
 }
 
-/** Spotlight that follows the pointer across a suggestion card. */
 function onSuggestionPointerMove(event) {
   const card = event.target.closest(".suggestion");
   if (!card || event.pointerType === "touch") return;
@@ -1270,7 +999,6 @@ function onSuggestionPointerMove(event) {
   card.style.setProperty("--my", event.clientY - rect.top + "px");
 }
 
-/** Keyboard shortcuts that do not get in the way of typing. */
 function onShortcuts(event) {
   const key = event.key.toLowerCase();
   const withModifier = event.ctrlKey || event.metaKey;
@@ -1304,58 +1032,24 @@ function onShortcuts(event) {
   }
 }
 
-/* -------------------------------------------------------------- start-up */
-
-/** Ask the backend which models are configured (never the API key). */
 async function loadConfig() {
   try {
     const response = await fetch("/api/config");
     if (!response.ok) throw new Error("config unavailable");
-    const data = await response.json();
-
-    ui.models = normaliseModels(data && data.models);
-    if (!ui.models.length && data && typeof data.model === "string" && data.model.trim()) {
-      // A backend that still reports one model name instead of a list.
-      ui.models = [{ id: data.model.trim(), label: data.model.trim() }];
-    }
-
-    const reported =
-      data && typeof data.default_model === "string" && data.default_model.trim()
-        ? data.default_model.trim()
-        : ui.models.length
-          ? ui.models[0].id
-          : "";
-    ui.defaultModel = reported || null;
-
-    // A model saved in this browser wins, as long as the backend still has it.
-    const saved = readModel(storage);
-    ui.model = modelById(saved) ? saved : ui.defaultModel;
-
-    renderModelGrid();
-    syncModelGrid();
     setBackendStatus(true, "Backend connected");
-    updateModelUi(); // after the status, so the pill shows the model
   } catch (error) {
-    ui.models = [];
-    ui.model = null;
-    ui.defaultModel = null;
-    renderModelPlaceholder("The Python backend is unreachable, so the model list cannot be loaded.");
     setBackendStatus(false, "Backend unreachable");
-    updateModelUi();
   }
 }
 
 function openSettings() {
-  // The list is cached from start-up; re-tick it in case anything moved.
-  syncModelGrid();
-  updateModelUi();
   el.settingsCount.textContent = String(state.conversations.length);
   if (typeof el.settingsDialog.showModal === "function") el.settingsDialog.showModal();
   else el.settingsDialog.setAttribute("open", "");
 }
 
 function wireEvents() {
-  // ---- composer ----
+
   el.composer.addEventListener("submit", (event) => {
     event.preventDefault();
     sendMessage();
@@ -1367,20 +1061,18 @@ function wireEvents() {
   });
 
   el.input.addEventListener("keydown", (event) => {
-    // Enter sends, Shift+Enter adds a line. isComposing keeps IME input intact.
+
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       sendMessage();
     }
   });
 
-  // ---- sidebar ----
-  el.newChat.addEventListener("click", newChat);
+el.newChat.addEventListener("click", newChat);
   el.collapse.addEventListener("click", toggleSidebar);
   el.drawer.addEventListener("click", openDrawer);
   el.scrim.addEventListener("click", closeDrawer);
   el.settingsBtn.addEventListener("click", openSettings);
-  el.modelPill.addEventListener("click", openSettings); // the pill opens Settings too
   el.wipe.addEventListener("click", wipeAllConversations);
 
   el.convList.addEventListener("click", onConversationListClick);
@@ -1399,8 +1091,7 @@ function wireEvents() {
     el.searchInput.focus();
   });
 
-  // ---- thread ----
-  el.threadInner.addEventListener("click", (event) => {
+el.threadInner.addEventListener("click", (event) => {
     onThreadCopyCode(event);
     onThreadClick(event);
   });
@@ -1409,53 +1100,39 @@ function wireEvents() {
   el.scrollBottom.addEventListener("click", () => scrollThreadToBottom("smooth"));
   el.clearBtn.addEventListener("click", clearConversation);
 
-  // ---- settings ----
-  el.themeGrid.addEventListener("change", (event) => {
+el.themeGrid.addEventListener("change", (event) => {
     if (event.target && event.target.name === "theme") applyTheme(event.target.value);
   });
 
-  el.modelGrid.addEventListener("change", (event) => {
-    if (event.target && event.target.name === "model") applyModel(event.target.value);
-  });
-
-  // ---- global ----
-  document.addEventListener("keydown", onShortcuts);
+document.addEventListener("keydown", onShortcuts);
   window.addEventListener("resize", () => {
     if (!window.matchMedia("(max-width: 900px)").matches) closeDrawer();
   });
 }
 
 function init() {
-  // 1. Icons for the static markup, then the theme radio group.
+
   hydrateIcons(document);
   renderThemeGrid();
 
-  // 2. Theme: theme-boot.js already set one before the first paint; this
-  //    call syncs the radio group and re-applies the stored value.
-  const savedTheme = readTheme(storage);
+const savedTheme = readTheme(storage);
   applyTheme(savedTheme || el.root.getAttribute("data-theme") || THEMES[0].id, { animate: false });
 
-  // 3. Sidebar state (collapsed rail on desktop, drawer on mobile).
-  const savedSidebar = readSidebarState(storage);
+const savedSidebar = readSidebarState(storage);
   if (savedSidebar === "collapsed" || savedSidebar === "expanded") {
     el.root.setAttribute("data-sidebar", savedSidebar);
   }
   updateCollapseButton();
 
-  // 4. First paint of the sidebar, top bar and thread.
-  autoGrow();
+autoGrow();
   updateCounter();
   renderAll({ scroll: "bottom" });
 
   wireEvents();
 
-  // 5. The model list comes from the backend, so it is fetched last.
-  renderModelPlaceholder("Reading the model list from the backend...");
-  loadConfig();
+loadConfig();
 
-  // 6. Focus the message box on desktop; on a phone that would pop the
-  //    on-screen keyboard before the user is ready.
-  if (!window.matchMedia("(max-width: 900px)").matches) focusComposer();
+if (!window.matchMedia("(max-width: 900px)").matches) focusComposer();
 }
 
 if (document.readyState === "loading") {

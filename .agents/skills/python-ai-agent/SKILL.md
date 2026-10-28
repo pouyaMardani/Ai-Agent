@@ -14,8 +14,9 @@ so every change must respect the existing boundaries:
   the FastAPI routes.
 - **Front end:** `static/` (HTML/CSS/JS served by FastAPI).
 - **Tests:** `tests/` (unittest-style suites, one file per feature area).
-- **Secrets:** `.env` only (`OPENAI_API_KEY`, `TAVILY_API_KEY`, and the model
-  keys). Never read them into code, logs, messages, or the browser.
+- **Secrets and provider settings:** `.env` only (`OPENAI_API_KEY`,
+  `TAVILY_API_KEY`, and the single `DEEPSEEK` model id). Never expose keys in
+  code, logs, messages, or the browser; provider settings remain server-side.
 
 Follow the workflow below for any code change in this project.
 

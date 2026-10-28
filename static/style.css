@@ -1,13 +1,7 @@
-/* ==========================================================================
-   Token Harbor Chat - design tokens and themes
-   --------------------------------------------------------------------------
-   Everything visual is driven by the custom properties below. A theme is
-   nothing more than a set of overrides for these variables, which is why
-   adding a fifth theme only needs one extra block.
-   ========================================================================== */
+
 
 :root {
-  /* ---- geometry & rhythm ---- */
+
   --radius-xs: 8px;
   --radius-sm: 12px;
   --radius-md: 16px;
@@ -22,21 +16,18 @@
   --space-5: 22px;
   --space-6: 32px;
 
-  /* ---- layout ---- */
-  --sidebar-w: 296px;
+--sidebar-w: 296px;
   --sidebar-w-collapsed: 84px;
   --thread-max: 820px;
   --blur: 20px;
 
-  /* ---- motion ---- */
-  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+--ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --dur-fast: 0.14s;
   --dur: 0.24s;
   --dur-slow: 0.45s;
 
-  /* ---- type ---- */
-  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+--font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
     "Inter", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "Cascadia Code", "JetBrains Mono", "Fira Code", ui-monospace,
     SFMono-Regular, Consolas, "Liberation Mono", monospace;
@@ -49,10 +40,6 @@
   --text-hero: clamp(1.5rem, 1.1rem + 1.6vw, 2.1rem);
 }
 
-/* ==========================================================================
-   THEME 1 / Midnight Glass - deep navy with violet and blue accents
-   (also the default, so unknown theme values still look intentional)
-   ========================================================================== */
 :root,
 [data-theme="midnight"] {
   color-scheme: dark;
@@ -106,9 +93,6 @@
   --inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
-/* ==========================================================================
-   THEME 2 / Aurora - dark teal with emerald and cyan light
-   ========================================================================== */
 [data-theme="aurora"] {
   color-scheme: dark;
 
@@ -161,9 +145,6 @@
   --inner-light: inset 0 1px 0 rgba(180, 255, 240, 0.08);
 }
 
-/* ==========================================================================
-   THEME 3 / Light Studio - bright, calm and soft, with real depth
-   ========================================================================== */
 [data-theme="studio"] {
   color-scheme: light;
 
@@ -216,9 +197,6 @@
   --inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
-/* ==========================================================================
-   THEME 4 / Cyberpunk - near-black metal with magenta and cyan signals
-   ========================================================================== */
 [data-theme="cyberpunk"] {
   color-scheme: dark;
 
@@ -271,8 +249,6 @@
   --inner-light: inset 0 1px 0 rgba(255, 200, 245, 0.07);
 }
 
-/* A gentle "breath" of the ambient light while the theme changes, which
-   hides the unavoidable instant swap of gradient surfaces. */
 html.is-theme-shifting .ambient {
   animation: theme-pulse 0.6s var(--ease-out) 1;
 }
@@ -289,8 +265,6 @@ html.is-theme-shifting .ambient {
   }
 }
 
-/* Respect the operating system "reduce motion" setting: keep the app usable,
-   drop anything that moves on its own. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

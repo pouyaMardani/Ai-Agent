@@ -1,7 +1,4 @@
-/* ==========================================================================
-   Token Harbor Chat - base layer
-   Loaded after style.css, which defines the tokens and themes.
-   ========================================================================== */
+
 
 *,
 *::before,
@@ -25,12 +22,11 @@ body {
   font-family: var(--font-sans);
   font-size: var(--text-base);
   line-height: 1.6;
-  overflow: hidden; /* the shell scrolls internally; the page never scrolls */
+  overflow: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-/* Smooth (but flash-free) colour changes when the theme is switched. */
 body,
 .sidebar,
 .topbar,
@@ -43,7 +39,6 @@ body,
     box-shadow var(--dur) var(--ease);
 }
 
-/* ---- type defaults ---- */
 h1,
 h2,
 h3,
@@ -100,14 +95,12 @@ kbd {
   color: var(--text-1);
 }
 
-/* ---- focus: always visible, never ugly ---- */
 :focus-visible {
   outline: 2px solid var(--accent-ring);
   outline-offset: 2px;
   border-radius: var(--radius-xs);
 }
 
-/* ---- scrollbars ---- */
 * {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--text-3) 45%, transparent) transparent;
@@ -134,7 +127,6 @@ kbd {
   background-clip: content-box;
 }
 
-/* ---- helpers ---- */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -172,9 +164,6 @@ kbd {
   display: none !important;
 }
 
-/* ==========================================================================
-   Ambient background
-   ========================================================================== */
 .ambient {
   position: fixed;
   inset: 0;
@@ -267,9 +256,6 @@ kbd {
   }
 }
 
-/* ==========================================================================
-   App shell - sidebar column + chat column
-   ========================================================================== */
 .shell {
   position: relative;
   z-index: 1;
@@ -284,9 +270,6 @@ html[data-sidebar="collapsed"] .shell {
   grid-template-columns: var(--sidebar-w-collapsed) minmax(0, 1fr);
 }
 
-/* ==========================================================================
-   Sidebar
-   ========================================================================== */
 .sidebar {
   position: relative;
   z-index: 30;
@@ -301,7 +284,6 @@ html[data-sidebar="collapsed"] .shell {
   box-shadow: var(--inner-light);
 }
 
-/* hairline edge with a soft fade, instead of a flat 1px border */
 .sidebar::after {
   content: "";
   position: absolute;
@@ -368,9 +350,6 @@ html[data-sidebar="collapsed"] .shell {
   padding: 0 var(--space-1);
 }
 
-/* ==========================================================================
-   Buttons, pills and small controls
-   ========================================================================== */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -477,61 +456,6 @@ html[data-sidebar="collapsed"] .shell {
   flex: none;
 }
 
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 6px 12px;
-  max-width: 240px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--stroke);
-  background-color: var(--surface-soft);
-  font-size: var(--text-xs);
-  color: var(--text-2);
-}
-
-.pill__dot {
-  width: 7px;
-  height: 7px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 10px var(--ok);
-}
-
-.pill.is-offline .pill__dot {
-  background: var(--danger);
-  box-shadow: 0 0 10px var(--danger);
-}
-
-.model-pill__name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
-}
-
-/* The pill is a button: clicking it opens Settings, where the model changes. */
-.model-pill {
-  font-family: var(--font-sans);
-  text-align: left;
-  transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
-    color var(--dur) var(--ease), transform var(--dur-fast) var(--ease);
-}
-
-.model-pill:hover {
-  color: var(--text-1);
-  background-color: var(--surface-hover);
-  border-color: var(--stroke-strong);
-}
-
-.model-pill:active {
-  transform: scale(0.99);
-}
-
-/* ==========================================================================
-   New chat button + search box
-   ========================================================================== */
 .new-chat {
   justify-content: flex-start;
   padding: 11px 14px;
@@ -601,9 +525,6 @@ html[data-sidebar="collapsed"] .shell {
   display: none;
 }
 
-/* ==========================================================================
-   History list
-   ========================================================================== */
 .history {
   flex: 1;
   min-height: 0;
@@ -753,7 +674,6 @@ html[data-sidebar="collapsed"] .shell {
   vertical-align: middle;
 }
 
-/* A conversation with a request on the way: the badge breathes. */
 .conv.is-pending .conv__monogram {
   border-color: var(--accent-ring);
   animation: pulse 1.4s var(--ease) infinite;
@@ -771,7 +691,6 @@ html[data-sidebar="collapsed"] .shell {
   }
 }
 
-/* Row actions (rename / delete) appear on hover or keyboard focus. */
 .conv__actions {
   position: absolute;
   right: 6px;
@@ -797,7 +716,6 @@ html[data-sidebar="collapsed"] .shell {
   pointer-events: auto;
 }
 
-/* Rename mode replaces the whole row with a text field. */
 .conv.is-editing .conv__main,
 .conv.is-editing .conv__actions {
   display: none;
@@ -819,9 +737,6 @@ html[data-sidebar="collapsed"] .shell {
   display: none;
 }
 
-/* ==========================================================================
-   Sidebar footer: settings entry + backend status
-   ========================================================================== */
 .sidebar__bottom {
   display: flex;
   flex-direction: column;
@@ -876,9 +791,6 @@ html[data-sidebar="collapsed"] .shell {
   box-shadow: 0 0 8px var(--danger);
 }
 
-/* ==========================================================================
-   Collapsed sidebar (desktop): icons only, tooltips carry the text
-   ========================================================================== */
 html[data-sidebar="collapsed"] .brand__text,
 html[data-sidebar="collapsed"] .nav-row__text,
 html[data-sidebar="collapsed"] .new-chat__label,
@@ -935,9 +847,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   left: -2px;
 }
 
-/* ==========================================================================
-   Chat column: top bar, thread, empty state
-   ========================================================================== */
 .chat {
   position: relative;
   z-index: 1;
@@ -1025,7 +934,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   padding: var(--space-6) var(--space-5) var(--space-5);
 }
 
-/* ---- empty conversation hero ---- */
 .empty {
   display: flex;
   flex-direction: column;
@@ -1098,7 +1006,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
-/* ---- suggested prompts ---- */
 .suggestions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1123,7 +1030,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
     box-shadow var(--dur) var(--ease);
 }
 
-/* a soft spotlight that follows the pointer (see app.js) */
 .suggestion::before {
   content: "";
   position: absolute;
@@ -1184,9 +1090,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   overflow: hidden;
 }
 
-/* ==========================================================================
-   Messages
-   ========================================================================== */
 .msg {
   display: flex;
   gap: var(--space-3);
@@ -1244,7 +1147,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   color: var(--text-2);
 }
 
-/* ---- user bubble: gradient, right aligned, tail on the top right ---- */
 .bubble {
   max-width: min(78%, 620px);
   padding: 12px 16px;
@@ -1257,7 +1159,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   font-size: var(--text-base);
 }
 
-/* ---- assistant answer: a translucent, layered panel ---- */
 .msg__panel {
   position: relative;
   padding: var(--space-4);
@@ -1283,7 +1184,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   opacity: 0.75;
 }
 
-/* ---- per-message actions (Copy / Regenerate) ---- */
 .msg__actions {
   display: flex;
   flex-wrap: wrap;
@@ -1328,7 +1228,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   color: var(--ok);
 }
 
-/* On touch screens there is no hover, so keep the actions visible. */
 @media (hover: none) {
   .msg__actions {
     opacity: 1;
@@ -1336,7 +1235,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
-/* ---- friendly error state with a Retry action ---- */
 .msg__error {
   display: flex;
   align-items: center;
@@ -1364,7 +1262,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   padding: 7px 12px;
 }
 
-/* ---- "thinking" indicator ---- */
 .typing {
   display: flex;
   align-items: center;
@@ -1415,9 +1312,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
-/* ==========================================================================
-   Markdown inside assistant answers
-   ========================================================================== */
 .md {
   font-size: var(--text-base);
   line-height: 1.7;
@@ -1514,7 +1408,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   font-weight: 650;
 }
 
-/* ---- code blocks with a copy button ---- */
 .code-block {
   border-radius: var(--radius-md);
   border: 1px solid var(--stroke);
@@ -1588,7 +1481,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   color: var(--code-ink);
 }
 
-/* ---- tables ---- */
 .table-wrap {
   overflow-x: auto;
   border-radius: var(--radius-sm);
@@ -1618,9 +1510,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   border-bottom: 0;
 }
 
-/* ==========================================================================
-   Composer (the floating input area)
-   ========================================================================== */
 .composer {
   position: relative;
   z-index: 12;
@@ -1785,7 +1674,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   opacity: 0.6;
 }
 
-/* ---- floating "jump to latest message" button ---- */
 .scroll-bottom {
   position: absolute;
   right: var(--space-5);
@@ -1811,9 +1699,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   transform: translateY(-2px);
 }
 
-/* ==========================================================================
-   Dialogs (settings + confirm)
-   ========================================================================== */
 .modal {
   width: 100%;
   max-width: min(680px, calc(100vw - 32px));
@@ -1961,7 +1846,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   overflow-wrap: anywhere;
 }
 
-/* ---- theme picker ---- */
 .theme-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2048,39 +1932,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   height: 18px;
 }
 
-/* ---- model picker ---- */
-.model-grid {
-  display: grid;
-  gap: var(--space-3);
-}
-
-.model-grid__empty {
-  padding: var(--space-3);
-  border: 1px dashed var(--stroke);
-  border-radius: var(--radius-md);
-  background-color: var(--surface-soft);
-  font-size: var(--text-sm);
-  color: var(--text-3);
-  overflow-wrap: anywhere;
-}
-
-.model-option__badge {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  flex: none;
-  border-radius: 11px;
-  border: 1px solid var(--stroke);
-  background-color: var(--accent-soft);
-  color: var(--accent-2);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
-/* ---- toasts ---- */
 .toasts {
   position: fixed;
   left: 50%;
@@ -2154,11 +2005,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
-/* ==========================================================================
-   Responsive behaviour
-   ========================================================================== */
-
-/* The drawer backdrop. Only shown on small screens (see below). */
 .scrim {
   position: fixed;
   inset: 0;
@@ -2178,7 +2024,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
-/* Tablet and small laptops: tighter chrome, still a fixed sidebar. */
 @media (max-width: 1180px) {
   :root {
     --thread-max: 760px;
@@ -2196,7 +2041,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
-/* Portrait tablets and phones: the sidebar turns into a slide-in drawer. */
 @media (max-width: 900px) {
   .shell,
   html[data-sidebar="collapsed"] .shell {
@@ -2219,9 +2063,7 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
     transform: translateX(0);
   }
 
-  /* The collapsed (icons-only) state is a desktop idea - undo it inside
-     the drawer so the list stays readable. */
-  html[data-sidebar="collapsed"] .brand__text,
+html[data-sidebar="collapsed"] .brand__text,
   html[data-sidebar="collapsed"] .conv__text,
   html[data-sidebar="collapsed"] .search,
   html[data-sidebar="collapsed"] .sidebar__status {
@@ -2279,7 +2121,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
-/* Phones. */
 @media (max-width: 640px) {
   :root {
     --radius-lg: 18px;
@@ -2298,10 +2139,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
     display: none;
   }
 
-  .model-pill {
-    max-width: 118px;
-  }
-
   .thread__inner {
     gap: var(--space-4);
     padding: 18px 12px 14px;
@@ -2317,8 +2154,7 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
     gap: 4px;
   }
 
-  /* On a phone the on-screen keyboard already explains Enter vs Shift+Enter. */
-  .composer__hint {
+.composer__hint {
     display: none;
   }
 
@@ -2353,7 +2189,6 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
-/* Touch devices have no hover, so actions stay visible. */
 @media (hover: none) {
   .conv__actions {
     opacity: 1;

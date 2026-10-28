@@ -1,4 +1,4 @@
-"""Tests for the Token Harbor backend (phase 2, step 1: the read_file tool).
+"""Tests for the Token Harbor backend.
 
 They run offline with the standard library only:
 

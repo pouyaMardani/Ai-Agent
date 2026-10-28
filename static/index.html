@@ -11,15 +11,13 @@
     <title>Token Harbor Chat</title>
     <link rel="stylesheet" href="/static/style.css" />
     <link rel="stylesheet" href="/static/app.css" />
-    <!-- This tiny script runs before the first paint, so the saved theme and
-         sidebar state are applied instantly: no white flash, no layout jump. -->
-    <script src="/static/js/theme-boot.js"></script>
+
+<script src="/static/js/theme-boot.js"></script>
   </head>
 
   <body>
-    <!-- Ambient background: layered light only. No images, no canvas, no
-         libraries - just three blurred orbs and a faint mesh grid. -->
-    <div class="ambient" aria-hidden="true">
+
+<div class="ambient" aria-hidden="true">
       <span class="orb orb--1"></span>
       <span class="orb orb--2"></span>
       <span class="orb orb--3"></span>
@@ -29,10 +27,8 @@
     <a class="skip-link" href="#composer-input">Skip to the message box</a>
 
     <div class="shell">
-      <!-- ==================================================================
-           SIDEBAR - brand, new chat, search, history, settings
-           ================================================================== -->
-      <aside class="sidebar" id="sidebar" aria-label="Conversations">
+
+<aside class="sidebar" id="sidebar" aria-label="Conversations">
         <div class="sidebar__top">
           <a class="brand" href="/" title="Token Harbor Chat">
             <span class="brand__tile">
@@ -115,10 +111,7 @@
 
       <div class="scrim" id="scrim" hidden></div>
 
-      <!-- ==================================================================
-           MAIN CHAT AREA
-           ================================================================== -->
-      <main class="chat" id="chat">
+<main class="chat" id="chat">
         <p id="sr-status" class="sr-only" role="status" aria-live="polite"></p>
 
         <header class="topbar">
@@ -139,16 +132,6 @@
           </div>
 
           <div class="topbar__actions">
-            <button
-              id="model-pill"
-              class="pill model-pill"
-              type="button"
-              title="Active model - click to change it in Settings"
-              aria-haspopup="dialog"
-            >
-              <span class="pill__dot" aria-hidden="true"></span>
-              <span class="model-pill__name" id="model-name">detecting...</span>
-            </button>
             <button
               id="clear-btn"
               class="icon-btn"
@@ -206,10 +189,7 @@
       </main>
     </div>
 
-    <!-- ====================================================================
-         SETTINGS DIALOG - the theme selector lives here
-         ==================================================================== -->
-    <dialog id="settings-dialog" class="modal" aria-labelledby="settings-title">
+<dialog id="settings-dialog" class="modal" aria-labelledby="settings-title">
       <form method="dialog" class="modal__card">
         <header class="modal__head">
           <div>
@@ -227,22 +207,8 @@
           </section>
 
           <section class="group">
-            <h3 class="group__title">Model</h3>
-            <p class="group__note">
-              Pick which model answers your messages. The list comes from the Python backend (.env) and your choice
-              is saved in this browser. It applies from your next message on.
-            </p>
-            <div class="model-grid" id="model-grid" role="radiogroup" aria-label="Model"></div>
-            <p class="group__note" id="model-note" hidden></p>
-          </section>
-
-          <section class="group">
             <h3 class="group__title">Connection</h3>
             <dl class="kv">
-              <div class="kv__row">
-                <dt class="kv__key">Active model</dt>
-                <dd class="kv__val" id="settings-model">detecting...</dd>
-              </div>
               <div class="kv__row">
                 <dt class="kv__key">Endpoint</dt>
                 <dd class="kv__val" id="settings-endpoint">Token Harbor (from .env)</dd>
@@ -270,10 +236,7 @@
       </form>
     </dialog>
 
-    <!-- ====================================================================
-         CONFIRM DIALOG - used for delete and clear actions
-         ==================================================================== -->
-    <dialog id="confirm-dialog" class="modal modal--sm" aria-labelledby="confirm-title">
+<dialog id="confirm-dialog" class="modal modal--sm" aria-labelledby="confirm-title">
       <form method="dialog" class="modal__card">
         <header class="modal__head">
           <div class="modal__headline">
