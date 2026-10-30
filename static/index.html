@@ -110,8 +110,14 @@
       </aside>
 
       <div class="scrim" id="scrim" hidden></div>
+      <div class="scrim scrim--analytics" id="analytics-scrim" hidden></div>
 
-<main class="chat" id="chat">
+      <!-- The chat and the analytics dashboard share one workspace row. On wide
+           screens they sit side by side; on narrow screens the dashboard slides
+           over the chat and is closed with the same scrim pattern as the
+           sidebar. -->
+<div class="workspace">
+        <main class="chat" id="chat">
         <p id="sr-status" class="sr-only" role="status" aria-live="polite"></p>
 
         <header class="topbar">
@@ -132,6 +138,17 @@
           </div>
 
           <div class="topbar__actions">
+            <button
+              id="analytics-btn"
+              class="icon-btn topbar__analytics"
+              type="button"
+              data-icon="gauge"
+              aria-label="Show token analytics"
+              aria-controls="analytics"
+              aria-expanded="false"
+              title="Token &amp; context analytics"
+            ></button>
+
             <button
               id="clear-btn"
               class="icon-btn"
@@ -186,7 +203,12 @@
             </p>
           </div>
         </form>
-      </main>
+        </main>
+
+        <aside class="analytics" id="analytics" aria-label="Token and context analytics">
+          <div class="analytics__inner" id="analytics-inner"></div>
+        </aside>
+      </div>
     </div>
 
 <dialog id="settings-dialog" class="modal" aria-labelledby="settings-title">

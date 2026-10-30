@@ -43,6 +43,9 @@ const ICONS = {
     '<path d="M10.3 4.1 2.9 17a2 2 0 0 0 1.7 3h14.8a2 2 0 0 0 1.7-3L13.7 4.1a2 2 0 0 0-3.4 0z" /><path d="M12 9.4v4.2" /><path d="M12 17.1h.01" />',
 
   code: '<path d="M9 8.5 4.5 12 9 15.5" /><path d="M15 8.5 19.5 12 15 15.5" />',
+
+  gauge:
+    '<path d="M4 14.4a8 8 0 0 1 16 0" /><path d="M12 14.4 16.4 9.2" /><circle cx="12" cy="14.4" r="1.6" />',
 };
 
 export function iconMarkup(name) {

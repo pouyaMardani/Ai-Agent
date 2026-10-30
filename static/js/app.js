@@ -4,6 +4,8 @@ import { hydrateIcons, iconMarkup } from "./icons.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import {
   LIMITS,
+  cleanContext,
+  cleanUsage,
   deriveTitle,
   makeConversation,
   readSidebarState,
@@ -85,6 +87,10 @@ const el = {
   title: document.getElementById("chat-title"),
   meta: document.getElementById("chat-meta"),
   clearBtn: document.getElementById("clear-btn"),
+  analytics: document.getElementById("analytics"),
+  analyticsInner: document.getElementById("analytics-inner"),
+  analyticsBtn: document.getElementById("analytics-btn"),
+  analyticsScrim: document.getElementById("analytics-scrim"),
   thread: document.getElementById("thread"),
   threadInner: document.getElementById("thread-inner"),
   scrollBottom: document.getElementById("scroll-bottom"),
@@ -112,6 +118,13 @@ const ui = {
   pendingId: null,
   editingId: null,
   query: "",
+  expandedUsage: new Set(),
+  expandedContext: new Set(),
+  // Which assistant turn the analytics panel describes, and which model request
+  // inside that turn. Both are resolved against the active conversation on every
+  // render, so a selection can never point at a message that no longer exists.
+  selectedId: null,
+  selectedCall: null,
 };
 
 function activeConversation() {
@@ -461,9 +474,1582 @@ function renderEmptyState() {
   return wrap;
 }
 
-function messageActions(isLast) {
+// --- Token usage UI --------------------------------------------------------
+//
+// One compact indicator per assistant response, shown outside the message
+// bubble in the response-action row. It opens a small panel built from the
+// usage the provider actually reported: a missing number is shown as N/A, never
+// as 0, and nothing is estimated from the text.
+
+const USAGE_UNAVAILABLE = "N/A";
+
+function formatTokens(value) {
+  if (!Number.isFinite(value)) return USAGE_UNAVAILABLE;
+  return value.toLocaleString();
+}
+
+function usageCollapsedLabel(usage) {
+  const total = usage.totals ? usage.totals.total_tokens : null;
+  if (Number.isFinite(total)) {
+    let label = formatTokens(total) + " tokens";
+    if (Number.isFinite(usage.model_calls) && usage.model_calls > 0) {
+      label += " \u00B7 " + usage.model_calls + (usage.model_calls === 1 ? " call" : " calls");
+    }
+    return label;
+  }
+  return usage.available ? "usage partly reported" : "usage not reported";
+}
+
+function usageBadge(usage) {
+  if (!usage.available) return { text: "Not reported", tone: "muted" };
+  if (usage.complete) return { text: "Complete data", tone: "ok" };
+  return { text: "Partial data", tone: "warn" };
+}
+
+function usageRow(label, value, hint) {
+  const row = document.createElement("div");
+  row.className = "usage-row";
+
+  const name = document.createElement("span");
+  name.className = "usage-row__label";
+  name.textContent = label;
+  if (hint) name.title = hint;
+
+  const number = document.createElement("span");
+  number.className = "usage-row__value" + (Number.isFinite(value) ? "" : " is-empty");
+  number.textContent = formatTokens(value);
+
+  row.append(name, number);
+  return row;
+}
+
+function usageBar(label, value, max, tone) {
+  const wrap = document.createElement("div");
+  wrap.className = "usage-bar" + (tone ? " usage-bar--" + tone : "");
+
+  const name = document.createElement("span");
+  name.className = "usage-bar__label";
+  name.textContent = label;
+
+  const track = document.createElement("span");
+  track.className = "usage-bar__track";
+  const fill = document.createElement("span");
+  fill.className = "usage-bar__fill";
+  const ratio =
+    Number.isFinite(value) && Number.isFinite(max) && max > 0
+      ? Math.max(0, Math.min(1, value / max))
+      : 0;
+  fill.style.width = Math.round(ratio * 100) + "%";
+  track.appendChild(fill);
+
+  wrap.append(name, track);
+  return wrap;
+}
+
+function callDescription(index, total, toolCalls) {
+  if (total <= 1) return "the only model request for this answer";
+  if (index === 0) return "initial model request";
+  if (index === total - 1) return "final model request - produced the answer above";
+  return toolCalls > 0 ? "model request after tool results" : "follow-up model request";
+}
+
+function usageCallBlock(call, index, total, toolCalls) {
+  const item = document.createElement("div");
+  item.className = "usage-call";
+
+  const head = document.createElement("div");
+  head.className = "usage-call__head";
+  const title = document.createElement("span");
+  title.className = "usage-call__title";
+  title.textContent = "Call " + (Number.isFinite(call.call_index) ? call.call_index : index + 1);
+  const desc = document.createElement("span");
+  desc.className = "usage-call__desc";
+  desc.textContent = callDescription(index, total, toolCalls);
+  head.append(title, desc);
+
+  const nums = document.createElement("div");
+  nums.className = "usage-call__nums";
+  const parts = [
+    ["Input", call.input_tokens, "Tokens this call read"],
+    ["Output", call.output_tokens, "Tokens this call wrote, including any tool-call arguments"],
+    ["Total", call.total_tokens, "Total reported for this call"],
+  ];
+  if (Number.isFinite(call.cached_input_tokens)) {
+    parts.push(["Cached", call.cached_input_tokens, "Cached input tokens (part of input)"]);
+  }
+  if (Number.isFinite(call.reasoning_tokens)) {
+    parts.push(["Reasoning", call.reasoning_tokens, "Reasoning tokens (part of output)"]);
+  }
+  parts.forEach(([key, value, hint]) => {
+    const chip = document.createElement("span");
+    chip.className = "usage-chip";
+    chip.title = hint;
+    const label = document.createElement("span");
+    label.className = "usage-chip__key";
+    label.textContent = key;
+    const val = document.createElement("span");
+    val.className = "usage-chip__val" + (Number.isFinite(value) ? "" : " is-empty");
+    val.textContent = formatTokens(value);
+    chip.append(label, val);
+    nums.appendChild(chip);
+  });
+
+  if (!call.reported) {
+    const miss = document.createElement("span");
+    miss.className = "usage-call__missing";
+    miss.textContent = "This call returned no usage data.";
+    nums.appendChild(miss);
+  }
+
+  item.append(head, nums);
+  return item;
+}
+
+function usageNote(usage) {
+  if (!usage.available) {
+    return (
+      "The provider did not report token usage for this response, so no numbers are shown. " +
+      "Nothing here is estimated from the length of the text."
+    );
+  }
+
+  const missing = [];
+  if (!Number.isFinite(usage.totals.cached_input_tokens)) missing.push("cached input");
+  if (!Number.isFinite(usage.totals.reasoning_tokens)) missing.push("reasoning");
+
+  const parts = [
+    "Input tokens cover everything the model read, including tool results sent back in later calls, so a follow-up call can cost more input than the first.",
+  ];
+  if (!usage.complete) {
+    parts.push("Some calls did not report every field, so values shown as N/A are unknown rather than zero.");
+  }
+  if (usage.derived_total) {
+    parts.push("The total was added up locally from complete input and output, because the provider sent no total.");
+  }
+  if (missing.length > 0) {
+    parts.push("The provider did not report " + missing.join(" or ") + " for this response.");
+  }
+  return parts.join(" ");
+}
+
+function buildUsagePanel(usage) {
+  const panel = document.createElement("div");
+  panel.className = "usage-panel";
+
+  const head = document.createElement("div");
+  head.className = "usage-panel__head";
+  const title = document.createElement("span");
+  title.className = "usage-panel__title";
+  title.textContent = "Token Usage";
+  const badge = usageBadge(usage);
+  const tag = document.createElement("span");
+  tag.className = "usage-panel__badge usage-panel__badge--" + badge.tone;
+  tag.textContent = badge.text;
+  head.append(title, tag);
+  panel.appendChild(head);
+
+  const totals = usage.totals || {};
+  const rows = document.createElement("div");
+  rows.className = "usage-panel__rows";
+  rows.append(
+    usageRow(
+      "Input tokens",
+      totals.input_tokens,
+      "Tokens processed as input for the model calls in this response."
+    ),
+    usageRow(
+      "Output tokens",
+      totals.output_tokens,
+      "Tokens generated by the model calls. This can include tool-call arguments, not only visible text."
+    ),
+    usageRow(
+      usage.derived_total ? "Total tokens (derived)" : "Total tokens",
+      totals.total_tokens,
+      usage.derived_total
+        ? "Not reported by the provider; added up locally from complete input and output."
+        : "Total tokens the provider reported for this response."
+    ),
+    usageRow(
+      "Cached input tokens",
+      totals.cached_input_tokens,
+      "Cached input the provider reused. Part of input, not extra usage."
+    ),
+    usageRow(
+      "Reasoning tokens",
+      totals.reasoning_tokens,
+      "Reasoning the provider reported. Part of output, not extra usage."
+    )
+  );
+  panel.appendChild(rows);
+
+  const input = totals.input_tokens;
+  const output = totals.output_tokens;
+  const core = (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0);
+  if (core > 0) {
+    const bars = document.createElement("div");
+    bars.className = "usage-panel__bars";
+    bars.append(usageBar("Input", input, core, "input"), usageBar("Output", output, core, "output"));
+    if (Number.isFinite(totals.cached_input_tokens) && Number.isFinite(input) && input > 0) {
+      bars.append(usageBar("Cached (of input)", totals.cached_input_tokens, input, "cached"));
+    }
+    if (Number.isFinite(totals.reasoning_tokens) && Number.isFinite(output) && output > 0) {
+      bars.append(usageBar("Reasoning (of output)", totals.reasoning_tokens, output, "reasoning"));
+    }
+    const barNote = document.createElement("p");
+    barNote.className = "usage-panel__hint";
+    barNote.textContent =
+      "Bars compare shares inside this response. Cached tokens are part of input and reasoning tokens are part of output, so they are not added on top.";
+    bars.appendChild(barNote);
+    panel.appendChild(bars);
+  }
+
+  const stats = document.createElement("div");
+  stats.className = "usage-panel__stats";
+  stats.append(
+    usageRow("Model API calls", usage.model_calls, "Real requests this response made to the model."),
+    usageRow(
+      "Tool calls",
+      usage.tool_calls,
+      "Tools the agent ran. A tool run is not a model API call, and its result becomes input for the next call."
+    )
+  );
+  panel.appendChild(stats);
+
+  if (Array.isArray(usage.calls) && usage.calls.length > 0) {
+    const calls = document.createElement("div");
+    calls.className = "usage-panel__calls";
+    const heading = document.createElement("p");
+    heading.className = "usage-panel__subhead";
+    heading.textContent = usage.calls.length > 1 ? "By model call" : "This model call";
+    calls.appendChild(heading);
+    usage.calls.forEach((call, index) => {
+      calls.appendChild(usageCallBlock(call, index, usage.calls.length, usage.tool_calls));
+    });
+    panel.appendChild(calls);
+  }
+
+  const note = document.createElement("p");
+  note.className = "usage-panel__note";
+  note.textContent = usageNote(usage);
+  panel.appendChild(note);
+
+  return panel;
+}
+
+function buildUsageIndicator(message) {
+  const usage = message && message.usage;
+  if (!usage || typeof usage !== "object") return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "msg__usage";
+
+  const panelId = "usage-panel-" + message.id;
+  const expanded = ui.expandedUsage.has(message.id);
+  if (expanded) wrap.classList.add("is-open");
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "usage-toggle";
+  toggle.dataset.action = "toggle-usage";
+  toggle.setAttribute("aria-controls", panelId);
+  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  toggle.title = usage.available
+    ? "Show the token usage the provider reported for this answer"
+    : "The provider did not report token usage for this answer";
+
+  const glyph = document.createElement("span");
+  glyph.className = "usage-toggle__glyph";
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.textContent = "\u25C8";
+
+  const label = document.createElement("span");
+  label.className = "usage-toggle__label";
+  label.textContent = usageCollapsedLabel(usage);
+
+  const chevron = document.createElement("span");
+  chevron.className = "usage-toggle__chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.innerHTML = iconMarkup("arrow-down");
+
+  toggle.append(glyph, label, chevron);
+
+  const panel = buildUsagePanel(usage);
+  panel.id = panelId;
+  panel.hidden = !expanded;
+  panel.setAttribute("role", "region");
+  panel.setAttribute("aria-label", "Token usage details");
+
+  wrap.append(toggle, panel);
+  return wrap;
+}
+
+function setUsageExpanded(button, expanded) {
+  const holder = button.closest(".msg__usage");
+  const panel = holder ? holder.querySelector(".usage-panel") : null;
+  button.setAttribute("aria-expanded", expanded ? "true" : "false");
+  if (holder) holder.classList.toggle("is-open", expanded);
+  if (panel) panel.hidden = !expanded;
+}
+
+// --- Context estimate & budget UI ------------------------------------------
+//
+// A second compact indicator next to Token Usage, answering a different
+// question: how big was the input going to be BEFORE each model call, and how
+// much room did the configured budget leave? Every number the estimator produced
+// is labelled as an estimate, and estimates stay visibly apart from the usage the
+// provider reported afterwards. The rows, chips and bars reuse the token-usage
+// classes on purpose, so both cards speak one visual language in every theme.
+
+function contextPrimaryCall(context) {
+  return context.calls.length > 0 ? context.calls[context.calls.length - 1] : null;
+}
+
+function contextBudgetOf(context, call) {
+  if (call && call.budget) return call.budget;
+  return context.budget;
+}
+
+function formatPercent(value) {
+  return Number.isFinite(value) ? Math.round(value) + "%" : USAGE_UNAVAILABLE;
+}
+
+function contextStateLabel(state, rejected) {
+  if (rejected) return "Rejected before sending";
+  if (state === "over") return "Over budget";
+  if (state === "approaching") return "Near the limit";
+  return "Comfortable";
+}
+
+function contextStateTone(state, rejected) {
+  if (rejected || state === "over") return "over";
+  if (state === "approaching") return "approaching";
+  return "comfortable";
+}
+
+function contextStateOf(context, call) {
+  const budget = contextBudgetOf(context, call);
+  const rejected = Boolean((call && call.rejected) || context.rejected);
+  const state = budget ? budget.budget_state : null;
+  return {
+    state,
+    rejected,
+    label: contextStateLabel(state, rejected),
+    tone: contextStateTone(state, rejected),
+  };
+}
+
+function contextEstimateBadge(context) {
+  const status = context.estimation_status;
+  if (status === "exact") return "Exact count";
+  if (status === "estimated") return "Estimated (unverified)";
+  if (status === "heuristic") return "Approximate";
+  return context.is_exact ? "Exact count" : "Estimated";
+}
+
+function contextEstimateLabel(context) {
+  const call = contextPrimaryCall(context);
+  const estimate = (call && call.estimate) || context.last_call || context.first_call;
+  const method = analyticsTokenizerName(estimate, context);
+  const status = context.estimation_status || (estimate ? estimate.estimation_status : null);
+
+  if (status === "exact") return "exact token count (" + method + ")";
+  if (status === "estimated") {
+    return "estimate with " + method + " - a compatible tokenizer, but not the model's own";
+  }
+  if (status === "heuristic") {
+    return "approximate count from " + method + " (about 4 characters per token)";
+  }
+  // Snapshots written before the tokenizer metadata existed still describe
+  // themselves with the method string alone.
+  const legacy = context.estimation_method || "";
+  if (context.is_exact) return "exact tokenizer count" + (legacy ? " (" + legacy + ")" : "");
+  if (legacy.indexOf("tiktoken:") === 0) return "estimated with " + legacy;
+  return "estimated from text length (character heuristic, about 4 characters per token)";
+}
+
+function contextCallLabel(index, total) {
+  if (total <= 1 || index === 0) return "Initial model call";
+  if (index === total - 1) return "Final model call";
+  return "Tool-loop model call";
+}
+
+function contextCollapsedLabel(context) {
+  const call = contextPrimaryCall(context);
+  const estimate = call ? call.estimate : context.last_call;
+  const budget = contextBudgetOf(context, call);
+  const estimated = estimate ? estimate.estimated_input_tokens : null;
+  if (!Number.isFinite(estimated)) return "context estimate unavailable";
+
+  let label = "Est. " + formatTokens(estimated) + " in";
+  if (budget && Number.isFinite(budget.max_input_budget_tokens)) {
+    label += " of " + formatTokens(budget.max_input_budget_tokens);
+  }
+  if (budget && Number.isFinite(budget.budget_utilization_percent)) {
+    label += " \u00B7 " + formatPercent(budget.budget_utilization_percent);
+  }
+  return label;
+}
+
+function usageValueRow(label, text, isMissing, hint) {
+  const row = document.createElement("div");
+  row.className = "usage-row";
+
+  const name = document.createElement("span");
+  name.className = "usage-row__label";
+  name.textContent = label;
+  if (hint) name.title = hint;
+
+  const value = document.createElement("span");
+  value.className = "usage-row__value" + (isMissing ? " is-empty" : "");
+  value.textContent = text;
+
+  row.append(name, value);
+  return row;
+}
+
+function contextChip(key, value, hint) {
+  const chip = document.createElement("span");
+  chip.className = "usage-chip";
+  chip.title = hint || "";
+
+  const label = document.createElement("span");
+  label.className = "usage-chip__key";
+  label.textContent = key;
+
+  const val = document.createElement("span");
+  val.className = "usage-chip__val" + (Number.isFinite(value) ? "" : " is-empty");
+  val.textContent = formatTokens(value);
+
+  chip.append(label, val);
+  return chip;
+}
+
+function contextDiscrepancyLine(discrepancy) {
+  const line = document.createElement("p");
+  line.className = "context-diff";
+
+  const diff = discrepancy.difference_tokens;
+  const num = document.createElement("span");
+  num.className = "context-diff__num";
+  const sign = Number.isFinite(diff) ? (diff > 0 ? "+" : diff < 0 ? "\u2212" : "\u00B1") : "";
+  num.textContent = sign + formatTokens(Number.isFinite(diff) ? Math.abs(diff) : NaN) + " tokens";
+
+  const note = document.createElement("span");
+  note.className = "context-diff__note";
+  note.textContent =
+    " estimation discrepancy: this request was estimated at " +
+    formatTokens(discrepancy.estimated_input_tokens) +
+    " input tokens and the provider reported " +
+    formatTokens(discrepancy.actual_input_tokens) +
+    ". It is not an extra cost and not a token category of its own.";
+
+  line.append(num, note);
+  return line;
+}
+
+function buildContextPanel(context) {
+  const panel = document.createElement("div");
+  panel.className = "context-panel";
+
+  const call = contextPrimaryCall(context);
+  const state = contextStateOf(context, call);
+  const budget = contextBudgetOf(context, call);
+
+  const head = document.createElement("div");
+  head.className = "usage-panel__head";
+  const title = document.createElement("span");
+  title.className = "usage-panel__title";
+  title.textContent = "Context & Budget";
+
+  const badges = document.createElement("span");
+  badges.className = "context-panel__badges";
+  const stateBadge = document.createElement("span");
+  stateBadge.className = "usage-panel__badge usage-panel__badge--" + state.tone;
+  stateBadge.textContent = state.label;
+  const methodBadge = document.createElement("span");
+  methodBadge.className = "usage-panel__badge usage-panel__badge--muted";
+  methodBadge.textContent = contextEstimateBadge(context);
+  badges.append(stateBadge, methodBadge);
+  head.append(title, badges);
+  panel.appendChild(head);
+
+  if (budget && budget.configuration_problem) {
+    const problem = document.createElement("p");
+    problem.className = "context-panel__problem";
+    problem.textContent = budget.configuration_problem;
+    panel.appendChild(problem);
+  }
+
+  // 1. The budget itself, in the same row style as the token usage card.
+  const rows = contextBudgetRows(context);
+  if (context.model) {
+    rows.prepend(
+      usageValueRow("Active model", context.model, false, "The model these requests were sent to.")
+    );
+  }
+  panel.appendChild(rows);
+
+  // 2. How close the estimate came to the input budget.
+  panel.appendChild(contextBudgetBar(context, call));
+
+  // 3. Where the estimate came from.
+  const method = document.createElement("p");
+  method.className = "context-panel__method";
+  method.textContent =
+    "Estimation method: " +
+    contextEstimateLabel(context) +
+    ". Every number here is an estimate made before the request, not the provider's own token count.";
+  panel.appendChild(method);
+
+  const estimateBlock = document.createElement("div");
+  estimateBlock.className = "usage-panel__stats";
+  const estimateHead = document.createElement("p");
+  estimateHead.className = "usage-panel__subhead";
+  estimateHead.textContent = "Where the estimate comes from";
+  estimateBlock.append(estimateHead, contextEstimateRows(context));
+  panel.appendChild(estimateBlock);
+
+  const notes = call && call.estimate.estimation_notes ? call.estimate.estimation_notes : "";
+  if (notes) {
+    const note = document.createElement("p");
+    note.className = "usage-panel__note";
+    note.textContent = notes;
+    panel.appendChild(note);
+  }
+  // 4. Estimate against the usage the provider actually reported.
+  const compareBlock = document.createElement("div");
+  compareBlock.className = "usage-panel__stats";
+  const compareHead = document.createElement("p");
+  compareHead.className = "usage-panel__subhead";
+  compareHead.textContent = context.rejected
+    ? "Estimate (nothing was sent)"
+    : "Estimate vs reported usage";
+  compareBlock.append(compareHead, contextComparison(context));
+  panel.appendChild(compareBlock);
+
+  // 5. Every model call of this answer, so a tool loop stays visible call by call.
+  const calls = context.calls;
+  if (calls.length > 0) {
+    const callList = document.createElement("div");
+    callList.className = "usage-panel__calls";
+    const heading = document.createElement("p");
+    heading.className = "usage-panel__subhead";
+    heading.textContent = calls.length > 1 ? "By model call" : "This model call";
+    callList.appendChild(heading);
+    calls.forEach((item, index) => {
+      callList.appendChild(contextCallBlock(item, index, calls.length));
+    });
+    panel.appendChild(callList);
+  }
+
+  const note = document.createElement("p");
+  note.className = "usage-panel__note";
+  note.textContent = contextNote(context);
+  panel.appendChild(note);
+
+  return panel;
+}
+
+function contextBudgetRows(context) {
+  const budget = contextBudgetOf(context, contextPrimaryCall(context));
+  const rows = document.createElement("div");
+  rows.className = "usage-panel__rows";
+  if (!budget) return rows;
+
+  rows.append(
+    usageRow(
+      "Maximum input budget",
+      budget.max_input_budget_tokens,
+      "Context window minus the maximum output allowance minus the safety margin."
+    ),
+    usageRow(
+      "Estimated input (before the request)",
+      budget.estimated_input_tokens,
+      "What the estimator measured just before the model call. This is not the provider's count."
+    ),
+    usageRow(
+      "Remaining input budget",
+      budget.remaining_input_budget_tokens,
+      "Maximum input budget minus the estimate. Shown as zero when the estimate is over budget."
+    ),
+    usageRow(
+      "Context window",
+      budget.context_window_tokens,
+      budget.context_window_note || "The capacity this app budgets for."
+    ),
+    usageRow(
+      "Maximum output allowance",
+      budget.max_output_tokens,
+      "Reserved for the answer before the request is sent."
+    ),
+    usageRow(
+      "Safety margin",
+      budget.context_safety_margin_tokens,
+      "Reserve for estimation error and provider-specific overhead."
+    )
+  );
+
+  if (budget.over_budget) {
+    rows.appendChild(
+      usageRow(
+        "Over budget by",
+        budget.over_budget_tokens,
+        "How far the estimate is above the maximum input budget."
+      )
+    );
+  }
+  return rows;
+}
+
+function contextBudgetBar(context, call) {
+  const budget = contextBudgetOf(context, call);
+  const wrap = document.createElement("div");
+  wrap.className = "context-budget-bar";
+  if (!budget) return wrap;
+
+  const state = contextStateOf(context, call);
+  const label =
+    "Estimated input vs maximum input budget: " +
+    formatTokens(budget.estimated_input_tokens) +
+    " / " +
+    formatTokens(budget.max_input_budget_tokens) +
+    " (" +
+    formatPercent(budget.budget_utilization_percent) +
+    ") \u00B7 " +
+    state.label;
+
+  wrap.appendChild(
+    usageBar(
+      label,
+      budget.estimated_input_tokens,
+      budget.max_input_budget_tokens,
+      state.tone
+    )
+  );
+
+  const hint = document.createElement("p");
+  hint.className = "usage-panel__hint";
+  hint.textContent =
+    "The bar compares the estimate with the maximum input budget. Under 70% is comfortable, " +
+    "70% to 100% is near the limit, and anything larger than the budget is over budget. " +
+    "The label and the numbers above it carry the same information as the colour.";
+  wrap.appendChild(hint);
+  return wrap;
+}
+
+function contextEstimateRows(context) {
+  const call = contextPrimaryCall(context);
+  const estimate = call ? call.estimate : context.last_call || context.first_call;
+  const rows = document.createElement("div");
+  rows.className = "usage-panel__rows";
+  if (!estimate) return rows;
+
+  rows.append(
+    usageRow(
+      "System prompt",
+      estimate.system_prompt_tokens,
+      "Estimated share of the input taken by the system instructions. Their text is never shown here."
+    ),
+    usageRow(
+      "Conversation history",
+      estimate.history_tokens,
+      "Estimated share taken by the saved conversation sent with this request."
+    ),
+    usageRow(
+      "Tool definitions",
+      estimate.tool_definitions_tokens,
+      "Estimated share taken by the JSON schemas of the tools offered with this call."
+    ),
+    usageRow(
+      "This turn and tool results",
+      estimate.other_input_tokens,
+      "Estimated share taken by your newest message, the assistant tool-call messages, the tool results and the loop reminder."
+    ),
+    usageValueRow(
+      "Messages in this request",
+      Number.isFinite(estimate.message_count) ? String(estimate.message_count) : USAGE_UNAVAILABLE,
+      !Number.isFinite(estimate.message_count),
+      "How many messages this request carried. Each message is counted once, so none is counted twice."
+    )
+  );
+  return rows;
+}
+
+function contextComparison(context) {
+  const call = contextPrimaryCall(context);
+  const wrap = document.createElement("div");
+  wrap.className = "context-compare";
+  if (!call) return wrap;
+
+  const actual = call.actual;
+  const rows = document.createElement("div");
+  rows.className = "usage-panel__rows";
+  rows.append(
+    usageRow(
+      "Estimated input (before the call)",
+      call.estimate.estimated_input_tokens,
+      "What this app expected the call to read."
+    ),
+    usageRow(
+      "Actual input (reported after the call)",
+      actual ? actual.input_tokens : null,
+      "What the provider said the call read. A missing value stays N/A and is never replaced with zero."
+    ),
+    usageRow(
+      "Actual output (reported after the call)",
+      actual ? actual.output_tokens : null,
+      "What the provider said the call wrote."
+    )
+  );
+  wrap.appendChild(rows);
+
+  const reported =
+    actual &&
+    (Number.isFinite(actual.input_tokens) ||
+      Number.isFinite(actual.output_tokens) ||
+      Number.isFinite(actual.total_tokens));
+
+  if (call.discrepancy) {
+    wrap.appendChild(contextDiscrepancyLine(call.discrepancy));
+  } else if (!reported) {
+    const missing = document.createElement("p");
+    missing.className = "context-diff context-diff--missing";
+    missing.textContent =
+      "The provider did not report usage for this call, so the estimate cannot be compared with an actual number.";
+    wrap.appendChild(missing);
+  }
+  return wrap;
+}
+
+function contextCallBlock(call, index, total) {
+  const item = document.createElement("div");
+  item.className = "context-call";
+
+  const head = document.createElement("div");
+  head.className = "context-call__head";
+  const title = document.createElement("span");
+  title.className = "context-call__title";
+  title.textContent = "Call " + (Number.isFinite(call.call_index) ? call.call_index : index + 1);
+  const desc = document.createElement("span");
+  desc.className = "context-call__desc";
+  desc.textContent = contextCallLabel(index, total);
+  head.append(title, desc);
+  item.appendChild(head);
+
+  const budget = call.budget;
+  const rows = document.createElement("div");
+  rows.className = "usage-panel__rows";
+  rows.append(
+    usageRow(
+      "Estimated input",
+      call.estimate.estimated_input_tokens,
+      "Estimate made immediately before this call."
+    ),
+    usageValueRow(
+      "Budget use",
+      budget ? formatPercent(budget.budget_utilization_percent) : USAGE_UNAVAILABLE,
+      !budget || !Number.isFinite(budget.budget_utilization_percent),
+      "Estimated input as a share of the maximum input budget."
+    ),
+    usageRow(
+      "Remaining budget",
+      budget ? budget.remaining_input_budget_tokens : null,
+      "Room left before this request would have been refused."
+    ),
+    usageRow(
+      "Tool definitions (estimated)",
+      call.estimate.tool_definitions_tokens,
+      "Only the calls that offer tools pay for their schemas."
+    )
+  );
+  item.appendChild(rows);
+
+  const actual = call.actual;
+  const chips = document.createElement("div");
+  chips.className = "usage-call__nums";
+  chips.append(
+    contextChip("Actual input", actual ? actual.input_tokens : null, "Input tokens the provider reported for this call."),
+    contextChip("Actual output", actual ? actual.output_tokens : null, "Output tokens the provider reported for this call."),
+    contextChip("Actual total", actual ? actual.total_tokens : null, "Total the provider reported for this call.")
+  );
+  const reported =
+    actual &&
+    (Number.isFinite(actual.input_tokens) ||
+      Number.isFinite(actual.output_tokens) ||
+      Number.isFinite(actual.total_tokens));
+  if (!reported) {
+    const missing = document.createElement("span");
+    missing.className = "usage-call__missing";
+    missing.textContent = "This call returned no usage data.";
+    chips.appendChild(missing);
+  }
+  item.appendChild(chips);
+
+  if (call.discrepancy) item.appendChild(contextDiscrepancyLine(call.discrepancy));
+
+  if (call.reduced && call.reduction_note) {
+    const note = document.createElement("p");
+    note.className = "context-call__note";
+    note.textContent = call.reduction_note;
+    item.appendChild(note);
+  }
+
+  if (call.rejected) {
+    const refused = document.createElement("p");
+    refused.className = "context-call__note context-call__note--over";
+    refused.textContent = "This request was refused before it was sent, so no usage exists for it.";
+    item.appendChild(refused);
+  }
+  return item;
+}
+
+function contextNote(context) {
+  const budget = contextBudgetOf(context, contextPrimaryCall(context));
+  const parts = [
+    "Estimates are made just before each call from the exact messages and tool definitions about to be sent, so they are not the provider's token counts and can differ from the actual usage shown in Token Usage.",
+  ];
+
+  if (budget && budget.context_window_source === "default") {
+    parts.push(
+      "The context window shown here is this app's configured budget, because the provider's real limit is not known to this app."
+    );
+  }
+  if (Number.isFinite(context.reduced_calls) && context.reduced_calls > 0) {
+    parts.push(
+      context.reduced_calls === 1
+        ? "One request was shortened to fit the budget."
+        : context.reduced_calls + " requests were shortened to fit the budget."
+    );
+  }
+  if (context.rejected) {
+    parts.push("This answer was refused by the budget check before any model call, so it has no actual usage.");
+  }
+  return parts.join(" ");
+}
+
+function buildContextIndicator(message) {
+  const context = message && message.context;
+  if (!context || typeof context !== "object") return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "msg__context";
+
+  const panelId = "context-panel-" + message.id;
+  const expanded = ui.expandedContext.has(message.id);
+  if (expanded) wrap.classList.add("is-open");
+
+  const state = contextStateOf(context, contextPrimaryCall(context));
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "context-toggle";
+  toggle.dataset.action = "toggle-context";
+  toggle.setAttribute("aria-controls", panelId);
+  toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  toggle.title = context.rejected
+    ? "Show why this request was refused by the context budget"
+    : "Show the estimated context and the budget this request was sent with";
+
+  const glyph = document.createElement("span");
+  glyph.className = "context-toggle__glyph";
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.textContent = "\u25A4";
+
+  const label = document.createElement("span");
+  label.className = "context-toggle__label";
+  label.textContent = contextCollapsedLabel(context);
+
+  const stateTag = document.createElement("span");
+  stateTag.className = "context-toggle__state context-toggle__state--" + state.tone;
+  stateTag.textContent = state.label;
+
+  const chevron = document.createElement("span");
+  chevron.className = "context-toggle__chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.innerHTML = iconMarkup("arrow-down");
+
+  toggle.append(glyph, label, stateTag, chevron);
+
+  const panel = buildContextPanel(context);
+  panel.id = panelId;
+  panel.hidden = !expanded;
+  panel.setAttribute("role", "region");
+  panel.setAttribute("aria-label", "Context estimate and budget details");
+
+  wrap.append(toggle, panel);
+  return wrap;
+}
+
+function setContextExpanded(button, expanded) {
+  const holder = button.closest(".msg__context");
+  const panel = holder ? holder.querySelector(".context-panel") : null;
+  button.setAttribute("aria-expanded", expanded ? "true" : "false");
+  if (holder) holder.classList.toggle("is-open", expanded);
+  if (panel) panel.hidden = !expanded;
+}
+
+// --- Analytics panel -------------------------------------------------------
+//
+// The analytics panel answers, for ONE selected assistant turn, the same two
+// questions the inline indicators answer: what the provider reported (Token
+// Tracking) and what this app estimated and budgeted before the request
+// (Context & Budget). Everything is read from the snapshot stored on the
+// message itself, so selecting an older turn shows that turn's numbers instead
+// of the newest ones, and a provider count is never mixed into an estimated row.
+
+function analyticsCalls(context) {
+  if (!context) return [];
+  if (Array.isArray(context.calls) && context.calls.length > 0) return context.calls;
+  // Fallback for a snapshot saved before per-call records existed: describe the
+  // turn as the single call the summary's own fields refer to.
+  const single = context.last_call || context.first_call;
+  if (!single) return [];
+  return [
+    {
+      call_index: 1,
+      estimate: single,
+      budget: context.budget,
+      reduced: false,
+      dropped_messages: 0,
+      reduction_note: null,
+      rejected: context.rejected === true,
+      actual: null,
+      discrepancy: null,
+    },
+  ];
+}
+
+function analyticsLatestTurn(conversation) {
+  if (!conversation || conversation.messages.length === 0) return null;
+  for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+    const message = conversation.messages[index];
+    if (message.role === "assistant") return message;
+  }
+  return null;
+}
+
+function analyticsTurnNumber(conversation, message) {
+  if (!conversation || !message) return null;
+  let turn = 0;
+  for (const item of conversation.messages) {
+    if (item.role === "assistant") turn += 1;
+    if (item.id === message.id) return turn;
+  }
+  return null;
+}
+
+// Keeps ui.selectedId pointing at a message that still exists in the active
+// conversation, so opening another chat and clearing one can never leave the
+// panel describing a turn that is no longer there. The default is the newest
+// assistant turn.
+function syncSelectedTurn() {
+  const conversation = activeConversation();
+  const stillThere =
+    conversation !== null &&
+    conversation.messages.some(
+      (message) => message.id === ui.selectedId && message.role === "assistant"
+    );
+  if (!stillThere) {
+    const latest = analyticsLatestTurn(conversation);
+    ui.selectedId = latest ? latest.id : null;
+    ui.selectedCall = null;
+  }
+  return conversation;
+}
+
+function analyticsSelectedMessage(conversation) {
+  if (!conversation) return null;
+  const chosen = conversation.messages.find(
+    (message) => message.id === ui.selectedId && message.role === "assistant"
+  );
+  return chosen || analyticsLatestTurn(conversation);
+}
+
+function analyticsTurnTitle(conversation, message) {
+  if (!message) return null;
+  const turn = analyticsTurnNumber(conversation, message);
+  const clock = formatClock(message.at);
+  return (Number.isFinite(turn) ? "Turn " + turn : "Assistant answer") + " \u00B7 " + clock;
+}
+
+function analyticsTokenizerName(estimate, context) {
+  if (context && context.tokenizer_label) return context.tokenizer_label;
+  if (!estimate) return null;
+  const method = estimate.estimation_method || "";
+  if (method.indexOf("tiktoken:") === 0) return "tiktoken (" + method.slice(9) + ")";
+  if (method.indexOf("huggingface:") === 0) return "Hugging Face (" + method.slice(12) + ")";
+  return estimate.tokenizer_name || "built-in character heuristic";
+}
+
+function analyticsCompatibility(estimate) {
+  const value = estimate ? estimate.tokenizer_compatibility : null;
+  if (value === "compatible") return { text: "Matches this model", tone: "ok" };
+  if (value === "unverified") return { text: "Compatibility unverified", tone: "warn" };
+  if (value === "unsupported") return { text: "No compatible tokenizer", tone: "muted" };
+  return { text: USAGE_UNAVAILABLE, tone: "muted" };
+}
+
+function analyticsEstimation(estimate) {
+  const value = estimate ? estimate.estimation_status : null;
+  if (value === "exact") return { text: "Exact token count", tone: "ok" };
+  if (value === "estimated") return { text: "Tokenizer estimate", tone: "warn" };
+  if (value === "heuristic") return { text: "Character heuristic (approximate)", tone: "warn" };
+  return { text: USAGE_UNAVAILABLE, tone: "muted" };
+}
+
+function analyticsUsageState(usage) {
+  if (!usage || !usage.available) return { text: "Not reported by the provider", tone: "muted" };
+  if (usage.complete) return { text: "Reported by the provider", tone: "ok" };
+  return { text: "Partly reported", tone: "warn" };
+}
+
+function analyticsBudgetState(budget) {
+  const value = budget ? budget.budget_status : null;
+  if (value === "within") return { text: "Within budget", tone: "ok" };
+  if (value === "approaching") return { text: "Approaching the limit", tone: "warn" };
+  if (value === "over") return { text: "Over budget", tone: "over" };
+  if (value === "unknown") return { text: "Budget unknown", tone: "muted" };
+  // Snapshots written before budget_status existed still carry budget_state.
+  const fallback = budget ? budget.budget_state : null;
+  if (fallback === "comfortable") return { text: "Within budget", tone: "ok" };
+  if (fallback === "approaching") return { text: "Approaching the limit", tone: "warn" };
+  if (fallback === "over") return { text: "Over budget", tone: "over" };
+  return { text: USAGE_UNAVAILABLE, tone: "muted" };
+}
+
+function analyticsWindowSource(budget) {
+  if (!budget) return null;
+  const origin = budget.context_window_origin;
+  if (origin === "verified") return "Verified model metadata";
+  if (origin === "unknown") return "No usable window could be read";
+  if (budget.context_window_source === "environment") return "Configured in .env";
+  if (budget.context_window_source === "default") return "Configured default";
+  if (origin === "configured") return "Configured value";
+  return null;
+}
+
+function analyticsPill(text, tone) {
+  const pill = document.createElement("span");
+  pill.className = "analytics-pill" + (tone ? " analytics-pill--" + tone : "");
+  pill.textContent = text;
+  return pill;
+}
+
+// A card is a titled table of label/value rows, so a screen reader reads
+// "Estimated input, 3,412" instead of two unrelated cells.
+function analyticsCard(title, subtitle) {
+  const card = document.createElement("section");
+  card.className = "analytics-card";
+
+  const head = document.createElement("header");
+  head.className = "analytics-card__head";
+  const name = document.createElement("h3");
+  name.className = "analytics-card__title";
+  name.textContent = title;
+  head.appendChild(name);
+  if (subtitle) {
+    const note = document.createElement("p");
+    note.className = "analytics-card__sub";
+    note.textContent = subtitle;
+    head.appendChild(note);
+  }
+
+  const table = document.createElement("table");
+  table.className = "analytics-table";
+  const body = document.createElement("tbody");
+  table.appendChild(body);
+
+  card.append(head, table);
+  return { card, body };
+}
+
+function analyticsRow(body, label, value, options = {}) {
+  const row = document.createElement("tr");
+
+  const key = document.createElement("th");
+  key.setAttribute("scope", "row");
+  key.textContent = label;
+  if (options.labelHint) key.title = options.labelHint;
+
+  const cell = document.createElement("td");
+  if (options.node) {
+    cell.appendChild(options.node);
+  } else if (Number.isFinite(value)) {
+    cell.textContent = options.percent ? formatPercent(value) : formatTokens(value);
+    cell.classList.add("is-num");
+  } else if (typeof value === "string" && value.trim()) {
+    cell.textContent = value;
+  } else {
+    cell.textContent = USAGE_UNAVAILABLE;
+    cell.classList.add("is-empty");
+  }
+  if (options.strong) cell.classList.add("is-strong");
+  if (options.hint) cell.title = options.hint;
+
+  row.append(key, cell);
+  body.appendChild(row);
+  return row;
+}
+
+function analyticsCallTable(calls, selectedIndex) {
+  const table = document.createElement("table");
+  table.className = "analytics-table analytics-table--calls";
+
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["Request", "Estimated input", "Actual input", "Actual output", "Budget use"].forEach((label) => {
+    const cell = document.createElement("th");
+    cell.setAttribute("scope", "col");
+    cell.textContent = label;
+    headRow.appendChild(cell);
+  });
+  head.appendChild(headRow);
+
+  const body = document.createElement("tbody");
+  calls.forEach((call, index) => {
+    const row = document.createElement("tr");
+    if (index === selectedIndex) row.className = "is-current";
+
+    const name = document.createElement("th");
+    name.setAttribute("scope", "row");
+    name.textContent = "Call " + (Number.isFinite(call.call_index) ? call.call_index : index + 1);
+    row.appendChild(name);
+
+    const values = [
+      call.estimate ? call.estimate.estimated_input_tokens : null,
+      call.actual ? call.actual.input_tokens : null,
+      call.actual ? call.actual.output_tokens : null,
+      call.budget ? call.budget.budget_utilization_percent : null,
+    ];
+    values.forEach((value, position) => {
+      const cell = document.createElement("td");
+      if (Number.isFinite(value)) {
+        cell.textContent =
+          position === values.length - 1 ? formatPercent(value) : formatTokens(value);
+        cell.classList.add("is-num");
+      } else {
+        cell.textContent = USAGE_UNAVAILABLE;
+        cell.classList.add("is-empty");
+      }
+      row.appendChild(cell);
+    });
+    body.appendChild(row);
+  });
+
+  table.append(head, body);
+  return table;
+}
+
+// Card 1: what the provider reported. Every row here either came back from the
+// provider or is explicitly labelled an estimate.
+function analyticsTokenCard(conversation, message, context, usage, calls, call, selectedIndex) {
+  const card = analyticsCard(
+    "Token Tracking",
+    message.error === true
+      ? "No model call was made for this turn"
+      : "The selected model request, then this turn's totals"
+  );
+  const rows = card.body;
+
+  analyticsRow(rows, "Selected turn", analyticsTurnTitle(conversation, message), {
+    strong: true,
+    hint: "Select another answer in the chat to move the panel to that turn.",
+  });
+
+  const estimate = call ? call.estimate : null;
+  analyticsRow(rows, "Tokenizer", analyticsTokenizerName(estimate, context), {
+    hint: "The counting method used for the estimate below.",
+  });
+
+  const compatibility = analyticsCompatibility(estimate);
+  analyticsRow(rows, "Tokenizer compatibility", null, {
+    node: analyticsPill(compatibility.text, compatibility.tone),
+    hint: "How closely that counting method matches the model that answered.",
+  });
+
+  const estimation = analyticsEstimation(estimate);
+  analyticsRow(rows, "Estimation status", null, {
+    node: analyticsPill(estimation.text, estimation.tone),
+    hint: "An estimate is never the model's own count, even when a real tokenizer produced it.",
+  });
+
+  analyticsRow(rows, "Estimated input", estimate ? estimate.estimated_input_tokens : null, {
+    hint: "Counted by this app before the request was sent. This is not provider usage.",
+  });
+
+  const actual = call ? call.actual : null;
+  analyticsRow(rows, "Actual input", actual ? actual.input_tokens : null, {
+    hint: "Reported by the provider after the request.",
+  });
+  analyticsRow(rows, "Actual output", actual ? actual.output_tokens : null, {
+    hint: "Reported by the provider after the request.",
+  });
+  analyticsRow(rows, "Actual total", actual ? actual.total_tokens : null, {
+    hint: "Reported by the provider after the request.",
+  });
+  if (actual && Number.isFinite(actual.cached_input_tokens)) {
+    analyticsRow(rows, "Cached input", actual.cached_input_tokens, {
+      hint: "Input the provider served from its cache.",
+    });
+  }
+  if (actual && Number.isFinite(actual.reasoning_tokens)) {
+    analyticsRow(rows, "Reasoning tokens", actual.reasoning_tokens, {
+      hint: "Reasoning tokens the provider reported.",
+    });
+  }
+
+  const discrepancy = call ? call.discrepancy : null;
+  if (discrepancy) {
+    const difference = discrepancy.difference_tokens;
+    const sign = difference > 0 ? "+" : difference < 0 ? "\u2212" : "\u00B1";
+    const percent = Number.isFinite(discrepancy.difference_percent)
+      ? " (" + formatPercent(discrepancy.difference_percent) + ")"
+      : "";
+    analyticsRow(
+      rows,
+      "Estimation discrepancy",
+      sign + formatTokens(Math.abs(difference)) + " tokens" + percent,
+      {
+        hint: "Provider-reported input minus the estimate: two ways of counting the same input, not extra usage.",
+      }
+    );
+  }
+
+  const usageState = analyticsUsageState(usage);
+  analyticsRow(rows, "Usage availability", null, {
+    node: analyticsPill(usageState.text, usageState.tone),
+    hint: "Whether the provider returned token usage for this turn.",
+  });
+
+  if (usage) {
+    const totals = usage.totals || {};
+    analyticsRow(rows, "Model API calls", usage.model_calls, {
+      hint: "How many times the model was called while answering this turn.",
+    });
+    analyticsRow(rows, "Tool calls", usage.tool_calls, {
+      hint: "How many tools ran while answering this turn.",
+    });
+    analyticsRow(rows, "Turn input (all requests)", totals.input_tokens, {
+      strong: true,
+      hint: "Sum of every model request in this turn, as reported by the provider.",
+    });
+    analyticsRow(rows, "Turn output (all requests)", totals.output_tokens, {
+      strong: true,
+      hint: "Sum of every model request in this turn, as reported by the provider.",
+    });
+    analyticsRow(rows, "Turn total (all requests)", totals.total_tokens, {
+      strong: true,
+      hint: "Sum of every model request in this turn, as reported by the provider.",
+    });
+  }
+
+  if (calls.length > 1) {
+    const details = document.createElement("details");
+    details.className = "analytics-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "Per-request breakdown (" + calls.length + " model requests)";
+    details.append(summary, analyticsCallTable(calls, selectedIndex));
+    card.card.appendChild(details);
+  }
+
+  return card.card;
+}
+
+// Card 2: what this app estimated and budgeted before the request. The rows
+// follow the arithmetic the backend documents:
+// input budget = context window - reserved output - safety margin.
+function analyticsBudgetCard(call, selectedIndex, calls) {
+  const budget = call ? call.budget : null;
+  const card = analyticsCard(
+    "Context & Budget",
+    "The selected request, judged against the configured budget"
+  );
+  const rows = card.body;
+
+  if (calls.length > 1) {
+    analyticsRow(rows, "Selected request", "Call " + (selectedIndex + 1) + " of " + calls.length, {
+      hint: "Use the request buttons above to inspect another model call in this turn.",
+    });
+  }
+
+  analyticsRow(rows, "Context window", budget ? budget.context_window_tokens : null, {
+    hint: "The window this app works within. It is a configured budget, not a provider fact.",
+  });
+  analyticsRow(rows, "Context window source", analyticsWindowSource(budget), {
+    hint: "Where that number came from.",
+  });
+  analyticsRow(rows, "Reserved for the answer", budget ? budget.max_output_tokens : null, {
+    hint: "Kept free so the model always has room to answer.",
+  });
+  analyticsRow(rows, "Safety margin", budget ? budget.context_safety_margin_tokens : null, {
+    hint: "Kept free as slack for a provider that counts the same request differently.",
+  });
+  analyticsRow(rows, "Input budget", budget ? budget.max_input_budget_tokens : null, {
+    strong: true,
+    hint: "Context window minus the reserved output and the safety margin.",
+  });
+  analyticsRow(rows, "Estimated input", budget ? budget.estimated_input_tokens : null, {
+    hint: "What this app counted for this request before sending it.",
+  });
+  analyticsRow(rows, "Remaining budget", budget ? budget.remaining_input_budget_tokens : null, {
+    hint: "Input budget minus the estimated input.",
+  });
+  if (budget && Number.isFinite(budget.over_budget_tokens) && budget.over_budget_tokens > 0) {
+    analyticsRow(rows, "Over budget by", budget.over_budget_tokens, {
+      hint: "How far past the input budget this request was.",
+    });
+  }
+  analyticsRow(rows, "Budget used", budget ? budget.budget_utilization_percent : null, {
+    percent: true,
+    hint: "Share of the input budget this request used.",
+  });
+
+  const state = analyticsBudgetState(budget);
+  analyticsRow(rows, "Budget status", null, {
+    node: analyticsPill(state.text, state.tone),
+    hint: "Approaching starts at the configured warning share of the input budget; over means nothing was left.",
+  });
+
+  const confidence =
+    (budget && budget.estimation_confidence) ||
+    (call && call.estimate ? call.estimate.estimation_confidence : null);
+  analyticsRow(rows, "Estimation confidence", confidence, {
+    hint: "How the input count behind this decision was produced.",
+  });
+
+  if (call && call.reduced) {
+    const dropped = Number.isFinite(call.dropped_messages) ? call.dropped_messages : 0;
+    analyticsRow(
+      rows,
+      "Context reduction",
+      dropped + (dropped === 1 ? " older message left out" : " older messages left out"),
+      { hint: call.reduction_note || "The oldest saved messages were left out to stay inside the budget." }
+    );
+  }
+
+  if (budget && budget.configuration_problem) {
+    const problem = document.createElement("p");
+    problem.className = "analytics-note analytics-note--warn";
+    problem.textContent = budget.configuration_problem;
+    card.card.appendChild(problem);
+  }
+
+  if (budget && budget.budget_caveat) {
+    const caveat = document.createElement("p");
+    caveat.className = "analytics-note";
+    caveat.textContent = budget.budget_caveat;
+    card.card.appendChild(caveat);
+  }
+
+  return card.card;
+}
+
+function analyticsCallsSelector(calls, selectedIndex) {
+  const group = document.createElement("div");
+  group.className = "analytics__calls";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "Model request");
+
+  const label = document.createElement("span");
+  label.className = "analytics__calls-label";
+  label.textContent = "Model request";
+  group.appendChild(label);
+
+  calls.forEach((call, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "analytics__call";
+    button.dataset.action = "select-call";
+    button.dataset.index = String(index);
+    button.setAttribute("aria-pressed", index === selectedIndex ? "true" : "false");
+    button.textContent = "Call " + (Number.isFinite(call.call_index) ? call.call_index : index + 1);
+    button.title = contextCallLabel(index, calls.length);
+    group.appendChild(button);
+  });
+
+  return group;
+}
+
+// Draws the whole panel from the selected turn's stored snapshot. Nothing is
+// fetched here: every number already arrived with the answer.
+function renderAnalytics() {
+  const inner = el.analyticsInner;
+  if (!inner) return;
+
+  const conversation = activeConversation();
+  const message = analyticsSelectedMessage(conversation);
+  const context = message && message.context ? message.context : null;
+  const usage = message && message.usage ? message.usage : null;
+  const calls = analyticsCalls(context);
+  const wanted = Number.isInteger(ui.selectedCall) ? ui.selectedCall : calls.length - 1;
+  const selectedIndex = calls.length > 0 ? Math.min(Math.max(wanted, 0), calls.length - 1) : -1;
+  const call = selectedIndex >= 0 ? calls[selectedIndex] : null;
+
+  // Rebuilding the panel keeps it simple, so the reader's scroll position is
+  // restored afterwards instead of jumping back to the top.
+  const keepScroll = el.analytics.scrollTop;
+  inner.innerHTML = "";
+
+  const head = document.createElement("header");
+  head.className = "analytics__head";
+
+  const titles = document.createElement("div");
+  titles.className = "analytics__titles";
+  const title = document.createElement("h2");
+  title.className = "analytics__title";
+  title.textContent = "Analytics";
+  const sub = document.createElement("p");
+  sub.className = "analytics__sub";
+  sub.textContent = message ? analyticsTurnTitle(conversation, message) : "No turn selected";
+  titles.append(title, sub);
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "icon-btn icon-btn--tiny analytics__close";
+  close.dataset.action = "close-analytics";
+  close.setAttribute("aria-label", "Hide analytics");
+  close.title = "Hide analytics";
+  close.innerHTML = iconMarkup("close");
+
+  head.append(titles, close);
+  inner.appendChild(head);
+
+  if (!message || (!context && !usage)) {
+    const empty = document.createElement("p");
+    empty.className = "analytics__empty";
+    empty.textContent =
+      conversation && conversation.messages.length > 0
+        ? "This turn has no token or context data. Select an answer the model produced."
+        : "No analytics yet. Send a message and the token and context numbers for that turn appear here.";
+    inner.appendChild(empty);
+    el.analytics.scrollTop = keepScroll;
+    return;
+  }
+
+  if (calls.length > 1) inner.appendChild(analyticsCallsSelector(calls, selectedIndex));
+
+  inner.appendChild(
+    analyticsTokenCard(conversation, message, context, usage, calls, call, selectedIndex)
+  );
+  inner.appendChild(analyticsBudgetCard(call, selectedIndex, calls));
+
+  const estimate = call ? call.estimate : null;
+  const parts = [];
+  if (estimate && estimate.estimation_notes) parts.push(estimate.estimation_notes);
+  const method = analyticsTokenizerName(estimate, context);
+  if (method) {
+    parts.push("Estimated input comes from " + method + " and is never the model's own count.");
+  }
+  if (usage && !usage.available) {
+    parts.push("The provider reported no usage for this turn, so no actual token counts are shown.");
+  }
+  if (context && context.model) parts.push("Model: " + context.model + ".");
+  if (parts.length > 0) {
+    const notes = document.createElement("p");
+    notes.className = "analytics-note";
+    notes.textContent = parts.join(" ");
+    inner.appendChild(notes);
+  }
+
+  el.analytics.scrollTop = keepScroll;
+}
+
+function updateSelectedTurn() {
+  el.threadInner.querySelectorAll(".msg--assistant[data-id]").forEach((row) => {
+    const selected = Boolean(ui.selectedId) && row.dataset.id === ui.selectedId;
+    row.classList.toggle("is-selected", selected);
+    const button = row.querySelector('[data-action="inspect"]');
+    if (button) button.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
+}
+
+function selectAnalyticsTurn(messageId) {
+  if (!messageId || ui.selectedId === messageId) return;
+  ui.selectedId = messageId;
+  ui.selectedCall = null;
+  updateSelectedTurn();
+  renderAnalytics();
+}
+
+// Clicking anywhere on an answer moves the panel to that turn. A click that is
+// part of selecting text, or that lands on a control, keeps the current turn so
+// copying and regenerating never move the panel by accident.
+function onThreadSelect(event) {
+  if (event.target.closest("[data-action], [data-copy-code], button, a, summary, input, textarea")) {
+    return;
+  }
+  const row = event.target.closest(".msg--assistant");
+  if (!row || !row.dataset.id) return;
+
+  const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+  if (selection && !selection.isCollapsed && String(selection).trim()) return;
+
+  selectAnalyticsTurn(row.dataset.id);
+}
+
+function openAnalytics() {
+  if (!window.matchMedia("(max-width: 1080px)").matches) return;
+  el.root.setAttribute("data-analytics", "open");
+  if (el.analyticsScrim) el.analyticsScrim.hidden = false;
+  if (el.analyticsBtn) el.analyticsBtn.setAttribute("aria-expanded", "true");
+}
+
+function closeAnalytics() {
+  if (!el.root.hasAttribute("data-analytics")) return;
+  el.root.removeAttribute("data-analytics");
+  if (el.analyticsScrim) el.analyticsScrim.hidden = true;
+  if (el.analyticsBtn) el.analyticsBtn.setAttribute("aria-expanded", "false");
+}
+
+function onAnalyticsClick(event) {
+  const trigger = event.target.closest("[data-action]");
+  if (!trigger) return;
+  const action = trigger.dataset.action;
+
+  if (action === "close-analytics") {
+    closeAnalytics();
+    return;
+  }
+
+  if (action === "select-call") {
+    const index = Number(trigger.dataset.index);
+    if (!Number.isInteger(index)) return;
+    ui.selectedCall = index;
+    renderAnalytics();
+  }
+}
+
+// The button that points the analytics panel at one answer. It stays visible in
+// the action row and states its pressed state, so the panel and the selected
+// turn can never disagree.
+function analyticsInspectButton(message) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "msg__action";
+  button.dataset.action = "inspect";
+  button.title = "Show this turn in the analytics panel";
+  button.setAttribute("aria-pressed", message.id === ui.selectedId ? "true" : "false");
+  button.innerHTML = iconMarkup("gauge") + "<span>Analytics</span>";
+  return button;
+}
+
+function messageActions(isLast, message) {
   const actions = document.createElement("div");
   actions.className = "msg__actions";
+
+  // Left: this response's context estimate and its token usage, both kept
+  // outside the message bubble.
+  const contextIndicator = buildContextIndicator(message);
+  if (contextIndicator) actions.appendChild(contextIndicator);
+
+  const indicator = buildUsageIndicator(message);
+  if (indicator) actions.appendChild(indicator);
+
+  // Right: the response actions, revealed on hover exactly like before.
+  const buttons = document.createElement("div");
+  buttons.className = "msg__actions__buttons";
+
+  buttons.appendChild(analyticsInspectButton(message));
 
   const copy = document.createElement("button");
   copy.type = "button";
@@ -471,7 +2057,7 @@ function messageActions(isLast) {
   copy.dataset.action = "copy-message";
   copy.title = "Copy this answer";
   copy.innerHTML = iconMarkup("copy") + "<span>Copy</span>";
-  actions.appendChild(copy);
+  buttons.appendChild(copy);
 
   if (isLast && !ui.busy) {
     const again = document.createElement("button");
@@ -480,9 +2066,10 @@ function messageActions(isLast) {
     again.dataset.action = "regenerate";
     again.title = "Ask the model again";
     again.innerHTML = iconMarkup("refresh") + "<span>Regenerate</span>";
-    actions.appendChild(again);
+    buttons.appendChild(again);
   }
 
+  actions.appendChild(buttons);
   return actions;
 }
 
@@ -490,6 +2077,11 @@ function renderMessage(conversation, message, index) {
   const row = document.createElement("article");
   row.className = "msg msg--" + message.role;
   row.dataset.id = message.id;
+
+  // The selected answer is the one the analytics panel describes.
+  if (message.role === "assistant" && message.id === ui.selectedId) {
+    row.classList.add("is-selected");
+  }
 
   const isLast = index === conversation.messages.length - 1;
 
@@ -537,11 +2129,24 @@ function renderMessage(conversation, message, index) {
       error.appendChild(retry);
     }
     body.appendChild(error);
+
+    // A refused request still carries the numbers that explain why it was refused.
+    const refusedContext = buildContextIndicator(message);
+    if (refusedContext) {
+      body.appendChild(refusedContext);
+      const actions = document.createElement("div");
+      actions.className = "msg__actions";
+      const buttons = document.createElement("div");
+      buttons.className = "msg__actions__buttons";
+      buttons.appendChild(analyticsInspectButton(message));
+      actions.appendChild(buttons);
+      body.appendChild(actions);
+    }
   } else {
     const panel = document.createElement("div");
     panel.className = "msg__panel md";
     panel.innerHTML = renderMarkdown(message.content);
-    body.append(panel, messageActions(isLast));
+    body.append(panel, messageActions(isLast, message));
   }
 
   row.append(avatar, body);
@@ -572,7 +2177,9 @@ function renderTyping() {
 }
 
 function renderThread(options = {}) {
-  const conversation = activeConversation();
+  // The analytics selection is resolved first, because renderMessage marks the
+  // row the panel is describing.
+  const conversation = syncSelectedTurn();
   const previousScroll = el.thread.scrollTop;
   const mode = options.scroll || "bottom";
 
@@ -603,6 +2210,7 @@ function renderAll(options = {}) {
   renderConversations();
   renderTopbar();
   renderThread(options);
+  renderAnalytics();
 }
 
 function autoGrow() {
@@ -648,6 +2256,8 @@ async function requestReply(conversationId, userIndex) {
 
   let reply = null;
   let failure = null;
+  let failureContext = null;
+  let data = null;
 
   try {
     const response = await fetch("/api/chat", {
@@ -659,7 +2269,6 @@ async function requestReply(conversationId, userIndex) {
       }),
     });
 
-    let data = null;
     try {
       data = await response.json();
     } catch (error) {
@@ -667,7 +2276,12 @@ async function requestReply(conversationId, userIndex) {
     }
 
     if (!response.ok) {
-      throw new Error((data && data.detail) || "The server could not answer. Please try again.");
+      const error = new Error(
+        (data && data.detail) || "The server could not answer. Please try again."
+      );
+      // A refused request also sends the context numbers that explain it.
+      if (data && data.context) error.context = data.context;
+      throw error;
     }
     reply =
       data && typeof data.reply === "string" && data.reply.trim()
@@ -675,23 +2289,43 @@ async function requestReply(conversationId, userIndex) {
         : "(The model returned an empty response.)";
   } catch (error) {
     failure = error && error.message ? error.message : "Something went wrong. Please try again.";
+    failureContext = cleanContext(error && error.context);
   }
 
 const target = state.conversations.find((item) => item.id === conversationId);
   if (target) {
     if (failure) {
-      target.messages.push({
+      const refused = {
         id: uid("m"),
         role: "assistant",
         content: failure,
         detail: failure,
         error: true,
         at: Date.now(),
-      });
+      };
+      if (failureContext) refused.context = failureContext;
+      target.messages.push(refused);
+      // A refused request is still a turn worth explaining, so the panel moves
+      // to it: its numbers are the reason the request was refused.
+      ui.selectedId = refused.id;
+      ui.selectedCall = null;
       announce("The request failed");
       toast(failure, "error");
     } else {
-      target.messages.push({ id: uid("m"), role: "assistant", content: reply, at: Date.now() });
+      // The usage and the context estimate belong to this assistant message
+      // only, and are sanitized before they are stored so a partial provider
+      // response can never crash the UI. Estimates and reported usage stay in
+      // separate fields.
+      const answer = { id: uid("m"), role: "assistant", content: reply, at: Date.now() };
+      const usage = cleanUsage(data && data.usage);
+      if (usage) answer.usage = usage;
+      const context = cleanContext(data && data.context);
+      if (context) answer.context = context;
+      target.messages.push(answer);
+      // The newest answer becomes the turn the analytics panel describes, so a
+      // fresh reply is never hidden behind an older selection.
+      ui.selectedId = answer.id;
+      ui.selectedCall = null;
       announce("Answer received");
     }
     target.updatedAt = Date.now();
@@ -974,6 +2608,43 @@ async function onThreadClick(event) {
     return;
   }
 
+  if (action === "toggle-usage") {
+    const row = trigger.closest(".msg");
+    const id = row ? row.dataset.id : "";
+    const isOpen = trigger.getAttribute("aria-expanded") === "true";
+    if (id) {
+      if (isOpen) ui.expandedUsage.delete(id);
+      else ui.expandedUsage.add(id);
+    }
+    setUsageExpanded(trigger, !isOpen);
+    return;
+  }
+
+  if (action === "toggle-context") {
+    const row = trigger.closest(".msg");
+    const id = row ? row.dataset.id : "";
+    const isOpen = trigger.getAttribute("aria-expanded") === "true";
+    if (id) {
+      if (isOpen) ui.expandedContext.delete(id);
+      else ui.expandedContext.add(id);
+    }
+    setContextExpanded(trigger, !isOpen);
+    return;
+  }
+
+  if (action === "inspect") {
+    const row = trigger.closest(".msg");
+    const id = row ? row.dataset.id : "";
+    if (id) {
+      selectAnalyticsTurn(id);
+      // On a narrow screen the panel is an overlay, so pointing it at a row must
+      // also reveal it. On a wide screen the panel is already visible and
+      // openAnalytics() deliberately does nothing.
+      openAnalytics();
+    }
+    return;
+  }
+
   if (action === "regenerate" || action === "retry") {
     await rerunLastTurn();
   }
@@ -1028,6 +2699,10 @@ function onShortcuts(event) {
       closeDrawer();
       return;
     }
+    if (el.root.hasAttribute("data-analytics")) {
+      closeAnalytics();
+      return;
+    }
     if (el.settingsDialog.open) el.settingsDialog.close();
   }
 }
@@ -1075,6 +2750,17 @@ el.newChat.addEventListener("click", newChat);
   el.settingsBtn.addEventListener("click", openSettings);
   el.wipe.addEventListener("click", wipeAllConversations);
 
+  // The analytics panel is delegated from its own container, which is never
+  // rebuilt, so selecting a request keeps working after every re-render.
+  if (el.analyticsBtn) {
+    el.analyticsBtn.addEventListener("click", () => {
+      if (el.root.hasAttribute("data-analytics")) closeAnalytics();
+      else openAnalytics();
+    });
+  }
+  if (el.analyticsScrim) el.analyticsScrim.addEventListener("click", closeAnalytics);
+  if (el.analytics) el.analytics.addEventListener("click", onAnalyticsClick);
+
   el.convList.addEventListener("click", onConversationListClick);
   el.convList.addEventListener("keydown", onConversationListKeydown);
   el.convList.addEventListener("focusout", onConversationListFocusOut);
@@ -1094,6 +2780,7 @@ el.newChat.addEventListener("click", newChat);
 el.threadInner.addEventListener("click", (event) => {
     onThreadCopyCode(event);
     onThreadClick(event);
+    onThreadSelect(event);
   });
   el.threadInner.addEventListener("pointermove", onSuggestionPointerMove);
   el.thread.addEventListener("scroll", updateScrollButton, { passive: true });
@@ -1107,6 +2794,7 @@ el.themeGrid.addEventListener("change", (event) => {
 document.addEventListener("keydown", onShortcuts);
   window.addEventListener("resize", () => {
     if (!window.matchMedia("(max-width: 900px)").matches) closeDrawer();
+    if (!window.matchMedia("(max-width: 1080px)").matches) closeAnalytics();
   });
 }
 

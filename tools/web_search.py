@@ -85,7 +85,6 @@ class WebSearchTool:
             },
         }
 
-    #start method
     def execute(self, arguments, http_post=None):
         query = arguments.get("query")
         if not isinstance(query, str):

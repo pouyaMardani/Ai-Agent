@@ -1187,14 +1187,24 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
 .msg__actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.msg__actions__buttons {
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--space-1);
+  margin-left: auto;
   opacity: 0;
   transform: translateY(-2px);
   transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 
-.msg:hover .msg__actions,
-.msg:focus-within .msg__actions {
+.msg:hover .msg__actions__buttons,
+.msg:focus-within .msg__actions__buttons {
   opacity: 1;
   transform: none;
 }
@@ -1228,8 +1238,585 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   color: var(--ok);
 }
 
+/* --- Token usage ----------------------------------------------------------
+   A compact indicator beside the response actions, with an expandable panel.
+   Everything reuses the theme tokens, so all four themes stay consistent. */
+
+.msg__usage {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.usage-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px 4px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-soft);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.usage-toggle:hover {
+  color: var(--text-1);
+  background-color: var(--surface-hover);
+  border-color: var(--stroke-strong);
+}
+
+.usage-toggle:focus-visible {
+  outline: none;
+  color: var(--text-1);
+  border-color: transparent;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.usage-toggle__glyph {
+  color: var(--accent-1);
+  font-size: 0.92em;
+  line-height: 1;
+}
+
+.usage-toggle__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-toggle__chevron {
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-3);
+  transition: transform var(--dur) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.usage-toggle__chevron .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.msg__usage.is-open .usage-toggle {
+  color: var(--text-1);
+  background-color: var(--surface-hover);
+  border-color: var(--stroke-strong);
+}
+
+.msg__usage.is-open .usage-toggle__chevron {
+  color: var(--accent-1);
+  transform: rotate(180deg);
+}
+
+.usage-panel {
+  margin-top: var(--space-2);
+  max-width: min(420px, 100%);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-raised);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-2);
+  animation: usage-open var(--dur) var(--ease-out) both;
+}
+
+@keyframes usage-open {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.usage-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.usage-panel__title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: 0.01em;
+}
+
+.usage-panel__badge {
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--stroke);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.usage-panel__badge--ok {
+  color: var(--ok);
+}
+
+.usage-panel__badge--warn {
+  color: var(--text-2);
+}
+
+.usage-panel__badge--muted {
+  color: var(--text-3);
+}
+
+.usage-panel__rows,
+.usage-panel__stats {
+  display: grid;
+  gap: 2px;
+}
+
+.usage-panel__stats {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--stroke);
+}
+
+.usage-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 22px;
+}
+
+.usage-row__label {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.usage-row__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-row__value.is-empty {
+  color: var(--text-3);
+  font-weight: 600;
+}
+
+.usage-panel__bars {
+  display: grid;
+  gap: 8px;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--stroke);
+}
+
+.usage-bar__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: 4px;
+}
+
+.usage-bar__label {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.usage-bar__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-bar__track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background-color: var(--surface-soft);
+  overflow: hidden;
+}
+
+.usage-bar__fill {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  transition: width var(--dur-slow) var(--ease-out);
+}
+
+.usage-bar__fill--input {
+  background-image: linear-gradient(90deg, var(--accent-1), var(--accent-2));
+}
+
+.usage-bar__fill--output {
+  background-image: linear-gradient(90deg, var(--accent-2), var(--accent-1));
+}
+
+.usage-bar__fill--cached {
+  background-image: linear-gradient(90deg, var(--stroke-strong), var(--text-3));
+}
+
+.usage-bar__fill--reasoning {
+  background-image: linear-gradient(90deg, var(--text-3), var(--accent-2));
+}
+
+.usage-panel__hint,
+.usage-panel__note,
+.usage-panel__subhead {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.usage-panel__hint {
+  margin-top: 2px;
+}
+
+.usage-panel__subhead {
+  margin-bottom: 6px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.usage-panel__calls {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--stroke);
+}
+
+.usage-panel__note {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--stroke);
+}
+
+.usage-call {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-soft);
+}
+
+.usage-call__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: 8px;
+}
+
+.usage-call__title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.usage-call__desc {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.usage-call__nums {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.usage-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-raised);
+}
+
+.usage-chip__key {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.usage-chip__val {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-chip__val.is-empty {
+  color: var(--text-3);
+  font-weight: 600;
+}
+
+.usage-call__missing {
+  align-self: center;
+  font-size: var(--text-xs);
+  font-style: italic;
+  color: var(--text-3);
+}
+
+/* --- Context estimate & budget ---------------------------------------------
+   A second compact indicator next to Token Usage. It reuses the usage rows,
+   chips and bars so both cards stay one visual language, and only the frames and
+   the state colours are new. Everything below uses theme tokens, so all four
+   themes and both light and dark surfaces keep their contrast. */
+
+.msg__context {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.context-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px 4px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-soft);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.context-toggle:hover {
+  color: var(--text-1);
+  background-color: var(--surface-hover);
+  border-color: var(--stroke-strong);
+}
+
+.context-toggle:focus-visible {
+  outline: none;
+  color: var(--text-1);
+  border-color: transparent;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.context-toggle__glyph {
+  color: var(--accent-2);
+  font-size: 0.92em;
+  line-height: 1;
+}
+
+.context-toggle__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-toggle__state {
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-raised);
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.context-toggle__state--comfortable {
+  color: var(--ok);
+}
+
+.context-toggle__state--approaching {
+  color: var(--accent-1);
+}
+
+.context-toggle__state--over {
+  color: var(--danger);
+}
+
+.context-toggle__chevron {
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-3);
+  transition: transform var(--dur) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.context-toggle__chevron .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.msg__context.is-open .context-toggle {
+  color: var(--text-1);
+  background-color: var(--surface-hover);
+  border-color: var(--stroke-strong);
+}
+
+.msg__context.is-open .context-toggle__chevron {
+  color: var(--accent-2);
+  transform: rotate(180deg);
+}
+
+.context-panel {
+  margin-top: var(--space-2);
+  max-width: min(440px, 100%);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-raised);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-2);
+  animation: usage-open var(--dur) var(--ease-out) both;
+}
+
+.context-panel__badges {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.usage-panel__badge--comfortable {
+  color: var(--ok);
+}
+
+.usage-panel__badge--approaching {
+  color: var(--accent-1);
+}
+
+.usage-panel__badge--over {
+  color: var(--danger);
+}
+
+.context-panel__problem,
+.context-call__note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.context-panel__problem,
+.context-call__note--over {
+  color: var(--danger);
+}
+
+.context-panel__method {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.context-budget-bar {
+  display: grid;
+  gap: 4px;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--stroke);
+}
+
+.usage-bar__fill--comfortable {
+  background-image: linear-gradient(90deg, var(--ok), var(--accent-2));
+}
+
+.usage-bar__fill--approaching {
+  background-image: linear-gradient(90deg, var(--accent-1), var(--accent-2));
+}
+
+.usage-bar__fill--over {
+  background-image: linear-gradient(90deg, var(--danger), var(--accent-1));
+}
+
+.context-compare {
+  display: grid;
+  gap: 6px;
+}
+
+.context-diff {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-soft);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.context-diff__num {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--accent-1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.context-diff__note {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.context-diff--missing {
+  display: block;
+  font-style: italic;
+  color: var(--text-3);
+}
+
+.context-call {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--stroke);
+  background-color: var(--surface-soft);
+}
+
+.context-call__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: 8px;
+}
+
+.context-call__title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.context-call__desc {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.context-call .usage-call__nums {
+  margin-top: 8px;
+}
+
 @media (hover: none) {
-  .msg__actions {
+  .msg__actions__buttons {
     opacity: 1;
     transform: none;
   }
@@ -2005,6 +2592,311 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   }
 }
 
+/* --- Split workspace: chat + analytics ------------------------------------
+   The chat keeps the flexible share of the row and the analytics dashboard
+   takes the rest. The dashboard is a fixed column with its own scrollbar, so it
+   stays put while the conversation scrolls and the reader never loses the
+   numbers they were looking at. */
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.62fr) minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.analytics {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  border-left: 1px solid var(--stroke);
+  background-color: color-mix(in srgb, var(--surface-glass) 46%, transparent);
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+}
+
+.analytics__inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-5);
+}
+
+.analytics__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.analytics__titles {
+  min-width: 0;
+}
+
+.analytics__title {
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.analytics__sub {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* The close button only matters while the panel covers the chat. */
+.analytics__close {
+  display: none;
+}
+
+.analytics__empty {
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.analytics__calls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.analytics__calls-label {
+  margin-right: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.analytics__call {
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--stroke);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-3);
+  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.analytics__call:hover {
+  color: var(--text-1);
+  background-color: var(--surface-hover);
+}
+
+.analytics__call[aria-pressed="true"] {
+  color: var(--text-1);
+  background-color: var(--accent-soft);
+  border-color: var(--accent-ring);
+}
+
+.analytics__call:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+
+.analytics-card {
+  overflow: hidden;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-soft);
+  box-shadow: var(--inner-light);
+}
+
+.analytics-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 10px var(--space-3);
+  border-bottom: 1px solid var(--stroke);
+  background-color: var(--surface-hover);
+}
+
+.analytics-card__title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.analytics-card__sub {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.analytics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.analytics-table th,
+.analytics-table td {
+  padding: 7px var(--space-3);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--stroke);
+}
+
+.analytics-table tbody tr:last-child th,
+.analytics-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.analytics-table tbody th {
+  width: 48%;
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+.analytics-table td {
+  text-align: right;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.analytics-table td.is-num {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.analytics-table td.is-strong {
+  font-weight: 650;
+}
+
+.analytics-table td.is-empty {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.analytics-table thead th {
+  width: auto;
+  text-align: right;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+.analytics-table thead th:first-child {
+  text-align: left;
+}
+
+.analytics-table--calls tbody tr.is-current th,
+.analytics-table--calls tbody tr.is-current td {
+  background-color: var(--accent-soft);
+  color: var(--text-1);
+}
+
+.analytics-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--stroke);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.analytics-pill--ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background-color: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+
+.analytics-pill--warn {
+  color: var(--accent-1);
+  border-color: var(--accent-ring);
+  background-color: var(--accent-soft);
+}
+
+.analytics-pill--over {
+  color: var(--danger);
+  border-color: var(--danger-ring);
+  background-color: var(--danger-soft);
+}
+
+.analytics-pill--muted {
+  color: var(--text-3);
+}
+
+.analytics-details {
+  margin: 0 var(--space-3) var(--space-3);
+  border-top: 1px solid var(--stroke);
+}
+
+.analytics-details summary {
+  padding: 9px 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.analytics-details summary:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.analytics-details .analytics-table {
+  overflow: hidden;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-xs);
+}
+
+.analytics-note {
+  margin: 0 var(--space-3) var(--space-3);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.analytics-note--warn {
+  color: var(--accent-1);
+}
+
+/* The overlay scrim sits under the sidebar drawer (60) but over the chat. */
+.scrim--analytics {
+  z-index: 55;
+}
+
+.topbar__analytics {
+  display: none;
+}
+
+/* The turn the analytics panel describes, marked in the conversation. */
+.msg.is-selected .msg__panel {
+  border-color: var(--accent-ring);
+  box-shadow: 0 0 0 1px var(--accent-soft), var(--inner-light);
+}
+
+.msg.is-selected .msg__panel::before {
+  opacity: 1;
+  background-image: linear-gradient(180deg, var(--accent-2), var(--accent-1));
+}
+
+.msg.is-selected .msg__author {
+  color: var(--accent-2);
+}
+
+.msg.is-selected .msg__error {
+  border-color: var(--accent-ring);
+}
+
+.msg__action[aria-pressed="true"] {
+  color: var(--accent-2);
+  border-color: var(--stroke);
+  background-color: var(--surface-hover);
+}
+
 .scrim {
   position: fixed;
   inset: 0;
@@ -2187,11 +3079,123 @@ html[data-sidebar="collapsed"] .brand__text,
   .modal__body {
     max-height: 70vh;
   }
+
+  .msg__actions {
+    gap: var(--space-1);
+  }
+
+  .usage-toggle {
+    max-width: 100%;
+  }
+
+  .usage-toggle__label {
+    max-width: 42vw;
+  }
+
+  .usage-panel {
+    max-width: 100%;
+    padding: var(--space-3);
+  }
+
+  .usage-panel__head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .usage-bar__head {
+    flex-wrap: wrap;
+  }
+
+  .usage-bar__label,
+  .usage-call__desc {
+    overflow-wrap: anywhere;
+  }
+
+  .context-toggle {
+    max-width: 100%;
+  }
+
+  .context-toggle__label {
+    max-width: 32vw;
+  }
+
+  .context-toggle__state {
+    max-width: 38vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .context-panel {
+    max-width: 100%;
+    padding: var(--space-3);
+  }
+
+  .context-panel .usage-panel__badge {
+    white-space: normal;
+  }
+
+  .context-panel__method,
+  .context-call__note,
+  .context-call__desc {
+    overflow-wrap: anywhere;
+  }
+
+  .context-diff__note {
+    flex-basis: 100%;
+  }
 }
 
 @media (hover: none) {
   .conv__actions {
     opacity: 1;
     pointer-events: auto;
+  }
+}
+
+/* --- Analytics dashboard on narrower screens -------------------------------
+   Below 1080px the dashboard becomes an overlay so the chat keeps its full
+   width. It is opened from the topbar and closed with its own scrim, exactly
+   the pattern the sidebar already uses. */
+
+@media (max-width: 1080px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .analytics {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 58;
+    width: min(92vw, 400px);
+    height: auto;
+    border-left: 1px solid var(--stroke);
+    background-color: var(--surface-solid);
+    box-shadow: var(--shadow-3);
+    transform: translateX(102%);
+    transition: transform var(--dur-slow) var(--ease-out);
+  }
+
+  html[data-analytics="open"] .analytics {
+    transform: translateX(0);
+  }
+
+  .analytics__close {
+    display: inline-grid;
+  }
+
+  .topbar__analytics {
+    display: inline-grid;
+  }
+}
+
+@media (max-width: 640px) {
+  .analytics__inner {
+    padding: var(--space-3) var(--space-3) var(--space-4);
+  }
+
+  .analytics-table tbody th {
+    width: 55%;
   }
 }

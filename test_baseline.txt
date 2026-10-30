@@ -1,0 +1,283 @@
+﻿[tool] web_search -> ok=False
+[tool] web_search -> ok=False
+[tool] web_search -> ok=True
+[tool] web_search -> ok=False
+[tool] web_search -> ok=True
+[tool] write_file -> ok=True
+py : ...E..EEEEEEEEE...EEEE....EEEF............................................
+At line:1 char:19
++ cd 'C:\Ai-Agent'; py -3 -m unittest discover -s tests 2>&1 | Out-File ...
++                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (...E..EEEEEEEEE..................:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+======================================================================
+ERROR: test_the_config_route_answers_without_a_network_call 
+(test_app_routes.AppWiringTests.test_the_config_route_answers_without_a_network_call)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 390, in test_the_config_route_answers_without_a_network_call
+    with mock.patch.object(app, "get_settings", lambda: dict(SETTINGS)):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_a_failed_write_through_the_route_says_so 
+(test_app_routes.ChatRouteTests.test_a_failed_write_through_the_route_says_so)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 226, in setUp
+    patch.start()
+    ~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1667, in start
+    result = self.__enter__()
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_a_failing_model_becomes_a_friendly_502 (test_app_routes.ChatRouteTests.test_a_failing_model_becomes_a_friendly_502)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 226, in setUp
+    patch.start()
+    ~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1667, in start
+    result = self.__enter__()
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_empty_message_is_rejected_with_400 (test_app_routes.ChatRouteTests.test_empty_message_is_rejected_with_400)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 226, in setUp
+    patch.start()
+    ~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1667, in start
+    result = self.__enter__()
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_legacy_model_request_value_cannot_change_the_configured_model 
+(test_app_routes.ChatRouteTests.test_legacy_model_request_value_cannot_change_the_configured_model)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 226, in setUp
+    patch.start()
+    ~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1667, in start
+    result = self.__enter__()
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_plain_reply_keeps_the_old_answer_shape (test_app_routes.ChatRouteTests.test_plain_reply_keeps_the_old_answer_shape)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 226, in setUp
+    patch.start()
+    ~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1667, in start
+    result = self.__enter__()
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_tool_round_trip_through_the_route (test_app_routes.ChatRouteTests.test_tool_round_trip_through_the_route)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 226, in setUp
+    patch.start()
+    ~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1667, in start
+    result = self.__enter__()
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_write_round_trip_through_the_route (test_app_routes.ChatRouteTests.test_write_round_trip_through_the_route)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 226, in setUp
+    patch.start()
+    ~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1667, in start
+    result = self.__enter__()
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_config_reports_backend_availability_only 
+(test_app_routes.ConfigRouteTests.test_config_reports_backend_availability_only)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 193, in test_config_reports_backend_availability_only
+    payload = self.payload_for({"model": "configured-model"})
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 189, in payload_for
+    with mock.patch.object(app, "get_settings", lambda: settings):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_the_api_key_and_base_url_never_reach_the_browser 
+(test_app_routes.ConfigRouteTests.test_the_api_key_and_base_url_never_reach_the_browser)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 197, in test_the_api_key_and_base_url_never_reach_the_browser
+    payload = self.payload_for(
+        {
+    ...<3 lines>...
+        }
+    )
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 189, in payload_for
+    with mock.patch.object(app, "get_settings", lambda: settings):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1510, in __enter__
+    original, local = self.get_original()
+                      ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Pouya\AppData\Local\Programs\Python\Python315\Lib\unittest\mock.py", line 1480, in get_original
+    raise AttributeError(
+        "%s does not have the attribute %r" % (target, name)
+    )
+AttributeError: <module 'app' from 'C:\\Ai-Agent\\app.py'> does not have the attribute 'get_settings'
+
+======================================================================
+ERROR: test_default_model_is_used_when_no_setting_is_present 
+(test_app_routes.ModelConfigTests.test_default_model_is_used_when_no_setting_is_present)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 94, in test_default_model_is_used_when_no_setting_is_present
+    self.assertEqual(app.configured_model({}), app.FALLBACK_MODEL)
+                     ^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'app' has no attribute 'configured_model'
+
+======================================================================
+ERROR: test_generic_model_setting_remains_supported 
+(test_app_routes.ModelConfigTests.test_generic_model_setting_remains_supported)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 88, in test_generic_model_setting_remains_supported
+    self.assertEqual(app.configured_model({"MODEL_NAME": "configured"}), "configured")
+                     ^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'app' has no attribute 'configured_model'
+
+======================================================================
+ERROR: test_primary_model_setting_wins_over_the_generic_fallback 
+(test_app_routes.ModelConfigTests.test_primary_model_setting_wins_over_the_generic_fallback)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 84, in test_primary_model_setting_wins_over_the_generic_fallback
+    model = app.configured_model({"DEEPSEEK": "primary", "MODEL_NAME": "fallback"})
+            ^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'app' has no attribute 'configured_model'
+
+======================================================================
+ERROR: test_retired_second_model_setting_is_ignored 
+(test_app_routes.ModelConfigTests.test_retired_second_model_setting_is_ignored)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 91, in test_retired_second_model_setting_is_ignored
+    self.assertEqual(app.configured_model({"MIMO": "secondary-model"}), app.FALLBACK_MODEL)
+                     ^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'app' has no attribute 'configured_model'
+
+======================================================================
+ERROR: test_a_missing_api_key_is_reported_clearly (test_app_routes.SettingsTests.test_a_missing_api_key_is_reported_clearly)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 131, in test_a_missing_api_key_is_reported_clearly
+    app.get_settings()
+    ^^^^^^^^^^^^^^^^
+AttributeError: module 'app' has no attribute 'get_settings'
+
+======================================================================
+ERROR: test_settings_carry_the_key_base_url_and_one_model 
+(test_app_routes.SettingsTests.test_settings_carry_the_key_base_url_and_one_model)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 141, in test_settings_carry_the_key_base_url_and_one_model
+    settings = app.get_settings()
+               ^^^^^^^^^^^^^^^^
+AttributeError: module 'app' has no attribute 'get_settings'
+
+======================================================================
+ERROR: test_the_client_is_built_with_a_timeout_and_one_retry 
+(test_app_routes.SettingsTests.test_the_client_is_built_with_a_timeout_and_one_retry)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 154, in test_the_client_is_built_with_a_timeout_and_one_retry
+    client = app.create_client(dict(SETTINGS))
+             ^^^^^^^^^^^^^^^^^
+AttributeError: module 'app' has no attribute 'create_client'
+
+======================================================================
+FAIL: test_every_function_defined_here_has_a_docstring 
+(test_app_routes.SingleFileTests.test_every_function_defined_here_has_a_docstring)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Ai-Agent\tests\test_app_routes.py", line 417, in test_every_function_defined_here_has_a_docstring
+    self.assertTrue(inspect.getdoc(value), f"app.{name}")
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None is not true : app.run_chat_with_tools
+
+----------------------------------------------------------------------
+Ran 74 tests in 0.240s
+
+FAILED (failures=1, errors=17)

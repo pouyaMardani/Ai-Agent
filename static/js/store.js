@@ -9,6 +9,8 @@ export const LIMITS = {
   messagesPerConversation: 240,
   historySentToApi: 40,
   titleLength: 60,
+  usageCallsPerMessage: 50,
+  contextCallsPerMessage: 50,
 };
 
 function createMemoryStorage() {
@@ -75,6 +77,223 @@ export function sortConversations(list) {
   return list.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
+// --- Token usage -----------------------------------------------------------
+//
+// The backend sends the real usage the provider reported. These helpers keep
+// that data when a conversation is saved and read back, and drop anything that
+// does not look like a token count. A missing field stays null so the UI can
+// say "N/A" instead of guessing 0.
+
+function cleanTokenCount(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.round(value);
+}
+
+function cleanUsageCall(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    call_index: cleanTokenCount(raw.call_index),
+    input_tokens: cleanTokenCount(raw.input_tokens),
+    output_tokens: cleanTokenCount(raw.output_tokens),
+    total_tokens: cleanTokenCount(raw.total_tokens),
+    cached_input_tokens: cleanTokenCount(raw.cached_input_tokens),
+    reasoning_tokens: cleanTokenCount(raw.reasoning_tokens),
+    reported: raw.reported !== false,
+  };
+}
+
+export function cleanUsage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const totals = raw.totals && typeof raw.totals === "object" ? raw.totals : {};
+  const calls = Array.isArray(raw.calls)
+    ? raw.calls.map(cleanUsageCall).filter(Boolean).slice(0, LIMITS.usageCallsPerMessage)
+    : [];
+
+  return {
+    available: raw.available === true,
+    complete: raw.complete === true,
+    derived_total: raw.derived_total === true,
+    model_calls: cleanTokenCount(raw.model_calls),
+    tool_calls: cleanTokenCount(raw.tool_calls),
+    totals: {
+      input_tokens: cleanTokenCount(totals.input_tokens),
+      output_tokens: cleanTokenCount(totals.output_tokens),
+      total_tokens: cleanTokenCount(totals.total_tokens),
+      cached_input_tokens: cleanTokenCount(totals.cached_input_tokens),
+      reasoning_tokens: cleanTokenCount(totals.reasoning_tokens),
+    },
+    calls,
+  };
+}
+
+// --- Context estimate and budget -------------------------------------------
+//
+// The backend sends what it estimated BEFORE each model call and what the
+// provider reported AFTER it. The two are kept in separate fields here as well,
+// and a missing number stays null so the UI can say "N/A" instead of showing a
+// zero that would look like a measurement.
+
+function cleanText(value, maxLength = 320) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text) return null;
+  return text.length > maxLength ? text.slice(0, maxLength - 1) + "\u2026" : text;
+}
+
+function cleanPercent(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.round(value * 10) / 10;
+}
+
+function cleanEnum(value, allowed) {
+  return typeof value === "string" && allowed.includes(value) ? value : null;
+}
+
+function cleanEstimate(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const estimate = {
+    estimated_input_tokens: cleanTokenCount(raw.estimated_input_tokens),
+    estimation_method: cleanText(raw.estimation_method, 80),
+    is_exact: raw.is_exact === true,
+    system_prompt_tokens: cleanTokenCount(raw.system_prompt_tokens),
+    history_tokens: cleanTokenCount(raw.history_tokens),
+    tool_definitions_tokens: cleanTokenCount(raw.tool_definitions_tokens),
+    other_input_tokens: cleanTokenCount(raw.other_input_tokens),
+    // The newest user message is also inside other_input_tokens; it is kept
+    // separately because it is the part the person just typed.
+    latest_user_message_tokens: cleanTokenCount(raw.latest_user_message_tokens),
+    message_count: cleanTokenCount(raw.message_count),
+    tool_definition_count: cleanTokenCount(raw.tool_definition_count),
+    estimation_notes: cleanText(raw.estimation_notes, 400),
+    // Which counting method produced this number, and how far it can be trusted.
+    tokenizer_backend: cleanText(raw.tokenizer_backend, 40),
+    tokenizer_name: cleanText(raw.tokenizer_name, 160),
+    tokenizer_label: cleanText(raw.tokenizer_label, 200),
+    tokenizer_compatibility: cleanEnum(raw.tokenizer_compatibility, [
+      "compatible",
+      "unverified",
+      "unsupported",
+    ]),
+    tokenizer_available: raw.tokenizer_available === true,
+    estimation_status: cleanEnum(raw.estimation_status, ["exact", "estimated", "heuristic"]),
+    estimation_confidence: cleanText(raw.estimation_confidence, 60),
+  };
+  if (estimate.estimated_input_tokens === null) return null;
+  return estimate;
+}
+
+function cleanBudgetVerdict(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    context_window_tokens: cleanTokenCount(raw.context_window_tokens),
+    context_window_source: cleanText(raw.context_window_source, 24),
+    // Where the window came from: a configured value, verified metadata or
+    // nothing usable. Kept separate from the source so the UI can name it.
+    context_window_origin: cleanEnum(raw.context_window_origin, [
+      "configured",
+      "verified",
+      "unknown",
+    ]),
+    context_window_note: cleanText(raw.context_window_note, 400),
+    max_output_tokens: cleanTokenCount(raw.max_output_tokens),
+    context_safety_margin_tokens: cleanTokenCount(raw.context_safety_margin_tokens),
+    max_input_budget_tokens: cleanTokenCount(raw.max_input_budget_tokens),
+    configuration_problem: cleanText(raw.configuration_problem, 400),
+    estimated_input_tokens: cleanTokenCount(raw.estimated_input_tokens),
+    remaining_input_budget_tokens: cleanTokenCount(raw.remaining_input_budget_tokens),
+    over_budget_tokens: cleanTokenCount(raw.over_budget_tokens),
+    over_budget: raw.over_budget === true,
+    budget_utilization_percent: cleanPercent(raw.budget_utilization_percent),
+    budget_state: cleanEnum(raw.budget_state, ["comfortable", "approaching", "over"]),
+    // The same judgement in the vocabulary the UI shows, plus the caveat that
+    // says when the decision rests on an approximate count.
+    budget_status: cleanEnum(raw.budget_status, ["within", "approaching", "over", "unknown"]),
+    budget_caveat: cleanText(raw.budget_caveat, 400),
+    estimation_confidence: cleanText(raw.estimation_confidence, 60),
+    accepted: raw.accepted !== false,
+  };
+}
+
+function cleanActualUsage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    input_tokens: cleanTokenCount(raw.input_tokens),
+    output_tokens: cleanTokenCount(raw.output_tokens),
+    total_tokens: cleanTokenCount(raw.total_tokens),
+    cached_input_tokens: cleanTokenCount(raw.cached_input_tokens),
+    reasoning_tokens: cleanTokenCount(raw.reasoning_tokens),
+  };
+}
+
+function cleanDiscrepancy(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const estimated = cleanTokenCount(raw.estimated_input_tokens);
+  const actual = cleanTokenCount(raw.actual_input_tokens);
+  if (estimated === null || actual === null) return null;
+  return {
+    estimated_input_tokens: estimated,
+    actual_input_tokens: actual,
+    difference_tokens: Number.isFinite(raw.difference_tokens)
+      ? Math.round(raw.difference_tokens)
+      : null,
+    difference_percent: cleanPercent(Math.abs(Number(raw.difference_percent))),
+    direction: cleanEnum(raw.direction, ["under", "over", "match"]),
+  };
+}
+
+function cleanContextCall(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const estimate = cleanEstimate(raw.estimate);
+  if (!estimate) return null;
+  return {
+    call_index: cleanTokenCount(raw.call_index),
+    estimate,
+    budget: cleanBudgetVerdict(raw.budget),
+    reduced: raw.reduced === true,
+    dropped_messages: cleanTokenCount(raw.dropped_messages),
+    reduction_note: cleanText(raw.reduction_note, 400),
+    rejected: raw.rejected === true,
+    actual: cleanActualUsage(raw.actual),
+    discrepancy: cleanDiscrepancy(raw.discrepancy),
+  };
+}
+
+export function cleanContext(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const calls = Array.isArray(raw.calls)
+    ? raw.calls.map(cleanContextCall).filter(Boolean).slice(0, LIMITS.contextCallsPerMessage)
+    : [];
+  const context = {
+    available: raw.available === true,
+    model: cleanText(raw.model, 120),
+    budget: cleanBudgetVerdict(raw.budget),
+    estimation_method: cleanText(raw.estimation_method, 80),
+    is_exact: raw.is_exact === true,
+    // Turn-level tokenizer metadata, describing the method used by the most
+    // recent model call of this answer.
+    tokenizer_backend: cleanText(raw.tokenizer_backend, 40),
+    tokenizer_name: cleanText(raw.tokenizer_name, 160),
+    tokenizer_label: cleanText(raw.tokenizer_label, 200),
+    tokenizer_compatibility: cleanEnum(raw.tokenizer_compatibility, [
+      "compatible",
+      "unverified",
+      "unsupported",
+    ]),
+    tokenizer_available: raw.tokenizer_available === true,
+    estimation_status: cleanEnum(raw.estimation_status, ["exact", "estimated", "heuristic"]),
+    estimation_confidence: cleanText(raw.estimation_confidence, 60),
+    model_calls: cleanTokenCount(raw.model_calls),
+    reduced_calls: cleanTokenCount(raw.reduced_calls),
+    rejected: raw.rejected === true,
+    first_call: cleanEstimate(raw.first_call),
+    last_call: cleanEstimate(raw.last_call),
+    context_growth_tokens: cleanTokenCount(raw.context_growth_tokens),
+    calls,
+  };
+  if (!context.first_call && !context.last_call && calls.length === 0) return null;
+  return context;
+}
+
 function cleanMessage(raw) {
   if (!raw || typeof raw !== "object") return null;
   const role = raw.role === "user" ? "user" : raw.role === "assistant" ? "assistant" : null;
@@ -88,9 +307,17 @@ function cleanMessage(raw) {
     content,
     at: Number.isFinite(raw.at) ? raw.at : Date.now(),
   };
+  // Context estimate and budget belong to the response itself, so they are kept
+  // for a refused request too: that is exactly when the numbers explain what
+  // happened.
+  const context = cleanContext(raw.context);
+  if (context) message.context = context;
   if (raw.error === true) {
     message.error = true;
     message.detail = typeof raw.detail === "string" ? raw.detail : "The request failed.";
+  } else {
+    const usage = cleanUsage(raw.usage);
+    if (usage) message.usage = usage;
   }
   return message;
 }

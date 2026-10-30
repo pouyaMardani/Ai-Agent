@@ -1,0 +1,17 @@
+﻿[tool] web_search -> ok=False
+[tool] web_search -> ok=False
+[tool] web_search -> ok=True
+[tool] web_search -> ok=False
+[tool] web_search -> ok=True
+[tool] write_file -> ok=True
+py : ......................................
+At line:1 char:19
++ ... d 'C:\Ai-Agent'; py -3 -m unittest tests.test_web_search 2>&1 | Out-F ...
++                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (......................................:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+----------------------------------------------------------------------
+Ran 38 tests in 0.103s
+
+OK
