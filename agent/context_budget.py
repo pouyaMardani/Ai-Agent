@@ -20,9 +20,40 @@ from config import (
 )
 
 # Small documented approximations: a message costs a few tokens for its role and
-# delimiters, a tool schema a few tokens for its name and wrapper.
+# delimiters, a tool schema a few tokens for its name and wrapper. They are
+# recorded as estimates, never as measurements.
 MESSAGE_OVERHEAD_TOKENS = 4
 TOOL_OVERHEAD_TOKENS = 8
+
+# The rows of the token estimation breakdown, in the order the analytics panel and
+# the copied report show them, each with how it was obtained:
+#   "tokenizer" - text this app counted with the active tokenizer, exactly once
+#   "estimated" - a documented rule (the constants above), not a measurement
+#   "unknown"   - part of the request this app cannot see (provider formatting)
+BREAKDOWN_COMPONENTS = (
+    ("system_content", "tokenizer"),
+    ("user_content", "tokenizer"),
+    ("assistant_content", "tokenizer"),
+    ("tool_content", "tokenizer"),
+    ("other_message_content", "tokenizer"),
+    ("structured_content", "tokenizer"),
+    ("tool_call_arguments", "tokenizer"),
+    ("tool_call_ids", "tokenizer"),
+    ("role_labels", "tokenizer"),
+    ("tool_definitions", "tokenizer"),
+    ("message_overhead", "estimated"),
+    ("tool_definition_overhead", "estimated"),
+    ("provider_serialization", "unknown"),
+)
+
+# Which content component a message's content belongs to, by role.
+ROLE_CONTENT_COMPONENTS = {
+    "system": "system_content",
+    "developer": "system_content",
+    "user": "user_content",
+    "assistant": "assistant_content",
+    "tool": "tool_content",
+}
 
 # Where the visual states of the budget bar start.
 BUDGET_APPROACHING_PERCENT = 70
@@ -42,26 +73,73 @@ class ContextBudgetExceeded(Exception):
         self.context = context
 
 
-def message_text_for_estimate(message):
-    """Build the text one prepared message contributes to a model request.
+def message_component_texts(message):
+    """Return the text parts of one prepared message, keyed by breakdown component.
 
-    The role, the content and any tool-call arguments are all part of what the
-    provider receives, so all of them are counted exactly once.
+    Every part is returned once, so the caller can count each of them exactly
+    once, and an empty part is left out rather than counted as zero tokens.
     """
-    parts = [str(message.get("role") or "")]
+    parts = {}
+
+    role = str(message.get("role") or "")
+    if role:
+        parts["role_labels"] = role
 
     content = message.get("content")
     if isinstance(content, str):
         if content:
-            parts.append(content)
+            parts[ROLE_CONTENT_COMPONENTS.get(role, "other_message_content")] = content
     elif content is not None:
-        parts.append(json.dumps(content, ensure_ascii=False, sort_keys=True))
+        # Structured content (for example a list of content parts) is sent as JSON;
+        # how a provider counts images inside it is not something this app knows.
+        parts["structured_content"] = json.dumps(content, ensure_ascii=False, sort_keys=True)
 
     tool_calls = message.get("tool_calls")
     if tool_calls:
-        parts.append(json.dumps(tool_calls, ensure_ascii=False, sort_keys=True))
+        parts["tool_call_arguments"] = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
 
-    return "\n".join(parts)
+    # A tool result names the call it answers, and that id travels in the request
+    # too; without it the provider could not match the pair.
+    tool_call_id = message.get("tool_call_id")
+    if isinstance(tool_call_id, str) and tool_call_id:
+        parts["tool_call_ids"] = tool_call_id
+
+    return parts
+
+
+def message_text_for_estimate(message):
+    """Build the text one prepared message contributes to a model request.
+
+    The role, the content, any tool-call arguments and the tool-call id in one
+    string: all of them are part of what the provider receives. The estimator
+    counts the parts separately, so a breakdown can name each of them.
+    """
+    return "\n".join(message_component_texts(message).values())
+
+
+def build_token_breakdown(measured, overhead, schema_count):
+    """Shape the measured parts and the documented overhead into breakdown rows.
+
+    A row carries a token count and how it was obtained. A row that cannot be
+    measured here carries no number at all instead of a guess, and the rows always
+    add up to the estimate the budget used, so the table can never disagree with
+    the total it is meant to explain.
+    """
+    rows = []
+    for key, measurement in BREAKDOWN_COMPONENTS:
+        if measurement == "unknown":
+            rows.append({"key": key, "tokens": None, "measurement": measurement})
+            continue
+        source = overhead if measurement == "estimated" else measured
+        rows.append({"key": key, "tokens": int(source.get(key, 0)), "measurement": measurement})
+
+    return {
+        "rows": rows,
+        "estimated_overhead_tokens": sum(
+            row["tokens"] for row in rows if row["measurement"] == "estimated"
+        ),
+        "tool_schema_count": int(schema_count),
+    }
 
 
 def estimate_context(messages, tool_schemas=None, history_count=0, model=None):
@@ -69,8 +147,11 @@ def estimate_context(messages, tool_schemas=None, history_count=0, model=None):
 
     `messages` is the exact list about to be sent, and `history_count` says how
     many of those came from the saved conversation, so the breakdown can separate
-    the saved conversation from this turn. A component that is not part of the
-    request is reported as None ("not present"), never as zero tokens.
+    the saved conversation from this turn. Every part of a message is counted on
+    its own and exactly once, which keeps the text-only count (`text_token_count`)
+    and the request-level estimate (`estimated_input_tokens`) distinguishable. A
+    component that is not part of the request is reported as None ("not present"),
+    never as zero tokens.
     """
     tokenizer = load_tokenizer(model)
     counter = tokenizer["counter"]
@@ -85,11 +166,22 @@ def estimate_context(messages, tool_schemas=None, history_count=0, model=None):
     other_tokens = 0
     latest_user_tokens = 0
     counted = 0
+    # Text that the active tokenizer counted, and the documented structural
+    # estimates kept apart from it, both keyed by breakdown component.
+    measured = {}
+    overhead = {"message_overhead": 0}
 
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
-        tokens = counter(message_text_for_estimate(message)) + MESSAGE_OVERHEAD_TOKENS
+        tokens = MESSAGE_OVERHEAD_TOKENS
+        overhead["message_overhead"] += MESSAGE_OVERHEAD_TOKENS
+
+        for key, text in message_component_texts(message).items():
+            part = counter(text)
+            measured[key] = measured.get(key, 0) + part
+            tokens += part
+
         counted += 1
         total += tokens
 
@@ -108,19 +200,30 @@ def estimate_context(messages, tool_schemas=None, history_count=0, model=None):
             latest_user_tokens = tokens
 
     schemas = list(tool_schemas or [])
-    tool_tokens = sum(
-        counter(json.dumps(schema, ensure_ascii=False, sort_keys=True)) + TOOL_OVERHEAD_TOKENS
-        for schema in schemas
-    )
+    schema_tokens = 0
+    for schema in schemas:
+        schema_tokens += counter(json.dumps(schema, ensure_ascii=False, sort_keys=True))
+    measured["tool_definitions"] = measured.get("tool_definitions", 0) + schema_tokens
+    overhead["tool_definition_overhead"] = TOOL_OVERHEAD_TOKENS * len(schemas)
+    tool_tokens = schema_tokens + overhead["tool_definition_overhead"]
     total += tool_tokens
 
     notes = []
     if tokenizer["limitations"]:
         notes.append(tokenizer["limitations"])
     if tool_tokens > 0:
-        notes.append("Tool definitions are estimated from the JSON schemas sent with this request.")
+        notes.append(
+            "Tool definitions are counted from the JSON schemas sent with this request, "
+            "plus a small estimated wrapper."
+        )
     notes.append("This covers the input only, and the provider's own count can differ.")
-    if not tokenizer["is_exact"]:
+    if tokenizer["is_exact"]:
+        notes.append(
+            "Text is counted with this model's own tokenizer; the per-message and "
+            "per-tool overhead added on top of it is an approximation, so this describes "
+            "the request rather than the provider's measurement of it."
+        )
+    else:
         notes.append(
             "The count is not exact, so any budget decision derived from it is an "
             "approximation rather than a measurement."
@@ -128,6 +231,11 @@ def estimate_context(messages, tool_schemas=None, history_count=0, model=None):
 
     return {
         "estimated_input_tokens": total,
+        # What the active tokenizer counted in the request text, kept next to the
+        # request-level total above: the two are different numbers, and neither
+        # stands in for the provider's own count.
+        "text_token_count": sum(measured.values()),
+        "breakdown": build_token_breakdown(measured, overhead, len(schemas)),
         "estimation_method": tokenizer["method"],
         "is_exact": bool(tokenizer["is_exact"]),
         "system_prompt_tokens": system_tokens or None,
@@ -141,6 +249,46 @@ def estimate_context(messages, tool_schemas=None, history_count=0, model=None):
         "tool_definition_count": len(schemas),
         "estimation_notes": " ".join(notes) or None,
         **build_tokenizer_metadata(tokenizer),
+    }
+
+
+def estimate_totals(records):
+    """Add up the per-request estimates of one turn, each request counted once.
+
+    A request the budget refused is not a model call, so it is left out rather
+    than counted as input the provider never saw. Every request that was sent
+    contributes its own numbers exactly once, which is what keeps a turn total
+    from counting a breakdown twice.
+    """
+    estimates = [
+        record["estimate"]
+        for record in records
+        if not record.get("rejected") and isinstance(record.get("estimate"), dict)
+    ]
+    if not estimates:
+        return None
+
+    def total(key):
+        numbers = [
+            estimate.get(key)
+            for estimate in estimates
+            if isinstance(estimate.get(key), int) and not isinstance(estimate.get(key), bool)
+        ]
+        return sum(numbers) if numbers else None
+
+    overheads = [
+        (estimate.get("breakdown") or {}).get("estimated_overhead_tokens")
+        for estimate in estimates
+    ]
+    overheads = [value for value in overheads if isinstance(value, int) and not isinstance(value, bool)]
+
+    return {
+        "requests": len(estimates),
+        "estimated_input_tokens": total("estimated_input_tokens"),
+        # The tokenizer's own text counts, added up the same way: no overhead and
+        # no provider measurement is mixed into this number.
+        "text_token_count": total("text_token_count"),
+        "estimated_overhead_tokens": sum(overheads) if overheads else None,
     }
 
 
@@ -406,6 +554,9 @@ def summarize_context(model, context_records, budget=None, rejected=False):
         "estimation_confidence": last.get("estimation_confidence"),
         "model_calls": model_calls,
         "reduced_calls": sum(1 for record in records if record.get("reduced")),
+        # The turn's own arithmetic, added up once per request that was really
+        # sent, so a per-call breakdown is never counted into two places.
+        "estimate_totals": estimate_totals(records),
         "rejected": bool(rejected),
         "first_call": first,
         "last_call": last,

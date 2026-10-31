@@ -11,6 +11,7 @@ export const LIMITS = {
   titleLength: 60,
   usageCallsPerMessage: 50,
   contextCallsPerMessage: 50,
+  breakdownRowsPerCall: 24,
 };
 
 function createMemoryStorage() {
@@ -149,10 +150,46 @@ function cleanEnum(value, allowed) {
   return typeof value === "string" && allowed.includes(value) ? value : null;
 }
 
+function cleanBreakdownRows(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((row) => {
+      if (!row || typeof row !== "object") return null;
+      const key = cleanText(row.key, 40);
+      if (!key) return null;
+      return {
+        key,
+        // A row the app cannot measure carries no number at all, and that stays
+        // null so the panel can say "N/A" instead of showing a zero it does not
+        // believe.
+        tokens: cleanTokenCount(row.tokens),
+        measurement: cleanEnum(row.measurement, ["tokenizer", "estimated", "unknown"]),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, LIMITS.breakdownRowsPerCall);
+}
+
+function cleanBreakdown(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const rows = cleanBreakdownRows(raw.rows);
+  if (rows.length === 0) return null;
+  return {
+    rows,
+    estimated_overhead_tokens: cleanTokenCount(raw.estimated_overhead_tokens),
+    tool_schema_count: cleanTokenCount(raw.tool_schema_count),
+  };
+}
+
 function cleanEstimate(raw) {
   if (!raw || typeof raw !== "object") return null;
   const estimate = {
     estimated_input_tokens: cleanTokenCount(raw.estimated_input_tokens),
+    // What the active tokenizer counted in the request text, next to the
+    // request-level estimate above it, plus the per-component breakdown behind
+    // both numbers.
+    text_token_count: cleanTokenCount(raw.text_token_count),
+    breakdown: cleanBreakdown(raw.breakdown),
     estimation_method: cleanText(raw.estimation_method, 80),
     is_exact: raw.is_exact === true,
     system_prompt_tokens: cleanTokenCount(raw.system_prompt_tokens),
@@ -258,6 +295,16 @@ function cleanContextCall(raw) {
   };
 }
 
+function cleanEstimateTotals(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    requests: cleanTokenCount(raw.requests),
+    estimated_input_tokens: cleanTokenCount(raw.estimated_input_tokens),
+    text_token_count: cleanTokenCount(raw.text_token_count),
+    estimated_overhead_tokens: cleanTokenCount(raw.estimated_overhead_tokens),
+  };
+}
+
 export function cleanContext(raw) {
   if (!raw || typeof raw !== "object") return null;
   const calls = Array.isArray(raw.calls)
@@ -284,6 +331,9 @@ export function cleanContext(raw) {
     estimation_confidence: cleanText(raw.estimation_confidence, 60),
     model_calls: cleanTokenCount(raw.model_calls),
     reduced_calls: cleanTokenCount(raw.reduced_calls),
+    // The turn's own estimate arithmetic, added up once per request that was
+    // really sent, so a turn total never counts a breakdown twice.
+    estimate_totals: cleanEstimateTotals(raw.estimate_totals),
     rejected: raw.rejected === true,
     first_call: cleanEstimate(raw.first_call),
     last_call: cleanEstimate(raw.last_call),

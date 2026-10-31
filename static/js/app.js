@@ -1640,6 +1640,218 @@ function analyticsCallTable(calls, selectedIndex) {
   return table;
 }
 
+// --- Token estimation breakdown --------------------------------------------
+//
+// The provider counts the request it serialises, this app counts the text it
+// sends plus a few documented overheads, and the two are never the same number.
+// The breakdown names each part so that difference can be read instead of
+// guessed: every row says whether it came from the tokenizer, from a documented
+// rule, or from nowhere at all (the provider's own serialization, which this app
+// cannot see). The keys and the numbers come from the backend in
+// `estimate.breakdown.rows`; only the labels live here.
+
+const BREAKDOWN_ORDER = [
+  "system_content",
+  "user_content",
+  "assistant_content",
+  "tool_content",
+  "other_message_content",
+  "structured_content",
+  "tool_call_arguments",
+  "tool_call_ids",
+  "role_labels",
+  "tool_definitions",
+  "message_overhead",
+  "tool_definition_overhead",
+  "provider_serialization",
+];
+
+const BREAKDOWN_LABELS = {
+  system_content: "System content",
+  user_content: "User content",
+  assistant_content: "Assistant content",
+  tool_content: "Tool content",
+  other_message_content: "Other message content",
+  structured_content: "Structured content",
+  tool_call_arguments: "Tool call arguments",
+  tool_call_ids: "Tool call ids",
+  role_labels: "Role labels",
+  tool_definitions: "Tool definitions",
+  message_overhead: "Message overhead",
+  tool_definition_overhead: "Tool definition overhead",
+  provider_serialization: "Provider serialization",
+};
+
+const BREAKDOWN_MEASUREMENTS = {
+  tokenizer: "Tokenizer",
+  estimated: "Estimated",
+  unknown: "Unknown",
+};
+
+// The rows the backend knows, in its order, plus anything it sends that this list
+// has not seen yet, so a new component never silently disappears.
+function analyticsBreakdownRows(estimate) {
+  const breakdown = estimate && estimate.breakdown ? estimate.breakdown : null;
+  const rows = breakdown && Array.isArray(breakdown.rows) ? breakdown.rows : [];
+  const ordered = BREAKDOWN_ORDER.map((key) => rows.find((row) => row.key === key)).filter(Boolean);
+  const rest = rows.filter((row) => BREAKDOWN_ORDER.indexOf(row.key) === -1);
+
+  return ordered.concat(rest).map((row) => ({
+    key: row.key,
+    label: BREAKDOWN_LABELS[row.key] || row.key,
+    // A row that cannot be measured has no number, and it stays null here so the
+    // panel shows N/A rather than a zero it does not believe.
+    tokens: Number.isFinite(row.tokens) ? row.tokens : null,
+    measurement: row.measurement,
+    measurementLabel: BREAKDOWN_MEASUREMENTS[row.measurement] || USAGE_UNAVAILABLE,
+  }));
+}
+
+function analyticsBreakdownTable(rows) {
+  const table = document.createElement("table");
+  table.className = "analytics-table analytics-table--breakdown";
+
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["Component", "Tokens", "Measurement"].forEach((label) => {
+    const cell = document.createElement("th");
+    cell.setAttribute("scope", "col");
+    cell.textContent = label;
+    headRow.appendChild(cell);
+  });
+  head.appendChild(headRow);
+
+  const body = document.createElement("tbody");
+  rows.forEach((row) => {
+    const line = document.createElement("tr");
+
+    const name = document.createElement("th");
+    name.setAttribute("scope", "row");
+    name.textContent = row.label;
+    if (row.measurement === "unknown") {
+      name.title = "The provider's own formatting and special tokens; this app cannot see them.";
+    }
+    line.appendChild(name);
+
+    const count = document.createElement("td");
+    if (Number.isFinite(row.tokens)) {
+      count.textContent = formatTokens(row.tokens);
+      count.classList.add("is-num");
+      if (row.measurement === "tokenizer") count.classList.add("is-strong");
+    } else {
+      count.textContent = USAGE_UNAVAILABLE;
+      count.classList.add("is-empty");
+    }
+    line.appendChild(count);
+
+    const measurement = document.createElement("td");
+    measurement.className = "analytics-table__measure";
+    measurement.textContent = row.measurementLabel;
+    if (row.measurement === "unknown") measurement.classList.add("is-empty");
+    line.appendChild(measurement);
+
+    body.appendChild(line);
+  });
+
+  table.append(head, body);
+  return table;
+}
+
+// The three metrics side by side: what the tokenizer counted, what this app
+// estimated for the request, and what the provider reported after the call.
+function analyticsBreakdownTotals(estimate, actual, discrepancy) {
+  const breakdown = estimate && estimate.breakdown ? estimate.breakdown : null;
+  const table = document.createElement("table");
+  table.className = "analytics-table analytics-table--totals";
+  const body = document.createElement("tbody");
+
+  analyticsRow(body, "Measured text tokens", estimate ? estimate.text_token_count : null, {
+    hint: "Counted by the active tokenizer over the exact text this app sent.",
+  });
+  analyticsRow(body, "Estimated overhead", breakdown ? breakdown.estimated_overhead_tokens : null, {
+    hint: "Documented rules (per-message delimiters, per-schema wrapper), not measurements.",
+  });
+  analyticsRow(
+    body,
+    "Total estimated request input",
+    estimate ? estimate.estimated_input_tokens : null,
+    {
+      strong: true,
+      hint: "Measured text plus estimated overhead. This is this app's number, not the provider's.",
+    }
+  );
+  analyticsRow(body, "Provider-reported actual input", actual ? actual.input_tokens : null, {
+    strong: true,
+    hint: "What the provider counted after it serialised the request.",
+  });
+  if (discrepancy) {
+    analyticsRow(body, "Unaccounted difference", analyticsDiscrepancyText(discrepancy), {
+      hint: "Provider count minus this estimate. It is not attributed to any component here, because the provider's own formatting is not visible from this app.",
+    });
+  }
+  if (actual && Number.isFinite(actual.cached_input_tokens)) {
+    analyticsRow(body, "Cached input (reported separately)", actual.cached_input_tokens, {
+      hint: "Already inside the provider's input; shown on its own here and never added to it again.",
+    });
+  }
+
+  table.appendChild(body);
+  return table;
+}
+
+function analyticsBreakdownNotes(context) {
+  const notes = [
+    "Tokenizer rows count the exact text this app sent, through the tokenizer reported above.",
+    "Estimated rows are documented rules, not measurements; the unknown row is a part of the request this app cannot see.",
+    "The unaccounted difference is the provider's count minus this estimate, and it is not assigned to any single component.",
+  ];
+
+  const totals = context ? context.estimate_totals : null;
+  if (
+    totals &&
+    Number.isFinite(totals.requests) &&
+    totals.requests > 1 &&
+    Number.isFinite(totals.estimated_input_tokens)
+  ) {
+    notes.push(
+      "Across all " +
+        totals.requests +
+        " model requests of this turn: " +
+        formatTokens(totals.text_token_count) +
+        " measured text tokens plus " +
+        formatTokens(totals.estimated_overhead_tokens) +
+        " estimated overhead = " +
+        formatTokens(totals.estimated_input_tokens) +
+        " estimated input, with every request counted once."
+    );
+  }
+
+  return notes;
+}
+
+function analyticsBreakdownDetails(estimate, actual, discrepancy, context, callLabel) {
+  const rows = analyticsBreakdownRows(estimate);
+  if (rows.length === 0) return null;
+
+  const details = document.createElement("details");
+  details.className = "analytics-details";
+
+  const summary = document.createElement("summary");
+  summary.textContent = "Token Estimation Breakdown" + (callLabel ? " (" + callLabel + ")" : "");
+  details.appendChild(summary);
+  details.appendChild(analyticsBreakdownTable(rows));
+  details.appendChild(analyticsBreakdownTotals(estimate, actual, discrepancy));
+
+  analyticsBreakdownNotes(context).forEach((text) => {
+    const note = document.createElement("p");
+    note.className = "analytics-note";
+    note.textContent = text;
+    details.appendChild(note);
+  });
+
+  return details;
+}
+
 // Card 1: what the provider reported. Every row here either came back from the
 // provider or is explicitly labelled an estimate.
 function analyticsTokenCard(conversation, message, context, usage, calls, call, selectedIndex) {
@@ -1700,19 +1912,9 @@ function analyticsTokenCard(conversation, message, context, usage, calls, call, 
 
   const discrepancy = call ? call.discrepancy : null;
   if (discrepancy) {
-    const difference = discrepancy.difference_tokens;
-    const sign = difference > 0 ? "+" : difference < 0 ? "\u2212" : "\u00B1";
-    const percent = Number.isFinite(discrepancy.difference_percent)
-      ? " (" + formatPercent(discrepancy.difference_percent) + ")"
-      : "";
-    analyticsRow(
-      rows,
-      "Estimation discrepancy",
-      sign + formatTokens(Math.abs(difference)) + " tokens" + percent,
-      {
-        hint: "Provider-reported input minus the estimate: two ways of counting the same input, not extra usage.",
-      }
-    );
+    analyticsRow(rows, "Estimation discrepancy", analyticsDiscrepancyText(discrepancy), {
+      hint: "Provider-reported input minus the estimate: two ways of counting the same input, not extra usage.",
+    });
   }
 
   const usageState = analyticsUsageState(usage);
@@ -1751,6 +1953,19 @@ function analyticsTokenCard(conversation, message, context, usage, calls, call, 
     details.append(summary, analyticsCallTable(calls, selectedIndex));
     card.card.appendChild(details);
   }
+
+  // One breakdown per model request, named with the call it belongs to, so two
+  // calls of the same turn can never be read as one.
+  const callLabel =
+    calls.length > 1 ? "Call " + (selectedIndex + 1) + " of " + calls.length : null;
+  const breakdown = analyticsBreakdownDetails(
+    estimate,
+    actual,
+    discrepancy,
+    context,
+    callLabel
+  );
+  if (breakdown) card.card.appendChild(breakdown);
 
   return card.card;
 }
@@ -1870,12 +2085,11 @@ function analyticsCallsSelector(calls, selectedIndex) {
   return group;
 }
 
-// Draws the whole panel from the selected turn's stored snapshot. Nothing is
-// fetched here: every number already arrived with the answer.
-function renderAnalytics() {
-  const inner = el.analyticsInner;
-  if (!inner) return;
-
+// The panel and the copied report read the same snapshot: the active
+// conversation, the selected turn, the context estimate and usage stored on it,
+// the per-call records, and the call the reader is looking at. Nothing is
+// fetched or recalculated, so the two can never disagree.
+function analyticsSnapshot() {
   const conversation = activeConversation();
   const message = analyticsSelectedMessage(conversation);
   const context = message && message.context ? message.context : null;
@@ -1883,7 +2097,25 @@ function renderAnalytics() {
   const calls = analyticsCalls(context);
   const wanted = Number.isInteger(ui.selectedCall) ? ui.selectedCall : calls.length - 1;
   const selectedIndex = calls.length > 0 ? Math.min(Math.max(wanted, 0), calls.length - 1) : -1;
-  const call = selectedIndex >= 0 ? calls[selectedIndex] : null;
+  return {
+    conversation,
+    message,
+    context,
+    usage,
+    calls,
+    selectedIndex,
+    call: selectedIndex >= 0 ? calls[selectedIndex] : null,
+  };
+}
+
+// Draws the whole panel from the selected turn's stored snapshot. Nothing is
+// fetched here: every number already arrived with the answer.
+function renderAnalytics() {
+  const inner = el.analyticsInner;
+  if (!inner) return;
+
+  const { conversation, message, context, usage, calls, selectedIndex, call } =
+    analyticsSnapshot();
 
   // Rebuilding the panel keeps it simple, so the reader's scroll position is
   // restored afterwards instead of jumping back to the top.
@@ -1911,7 +2143,13 @@ function renderAnalytics() {
   close.title = "Hide analytics";
   close.innerHTML = iconMarkup("close");
 
-  head.append(titles, close);
+  // The copy button sits beside the close button and copies the whole report,
+  // not only the rows that happen to be visible.
+  const actions = document.createElement("div");
+  actions.className = "analytics__actions";
+  actions.append(analyticsCopyButton(Boolean(message && (context || usage))), close);
+
+  head.append(titles, actions);
   inner.appendChild(head);
 
   if (!message || (!context && !usage)) {
@@ -1952,6 +2190,424 @@ function renderAnalytics() {
   }
 
   el.analytics.scrollTop = keepScroll;
+}
+
+// --- Analytics report for the clipboard ------------------------------------
+//
+// One plain-text report for the whole selected turn, built from the same
+// snapshot the panel renders: nothing is fetched or recalculated, a value that
+// is not part of that snapshot is written as N/A instead of being guessed, and
+// an estimated value is never placed beside a provider-reported one without
+// saying which is which. It carries numbers only - no message text, no prompts
+// and nothing from .env.
+
+function reportField(label, value, format) {
+  if (Number.isFinite(value)) {
+    return label + ": " + (format ? format(value) : formatTokens(value));
+  }
+  const text = typeof value === "string" ? value.trim() : "";
+  return label + ": " + (text || USAGE_UNAVAILABLE);
+}
+
+function reportSection(title, lines) {
+  return [title, "-".repeat(title.length), ...lines, ""];
+}
+
+// The same wording as the card row above, so the report and the panel cannot
+// disagree about the same number.
+function analyticsDiscrepancyText(discrepancy) {
+  const difference = discrepancy.difference_tokens;
+  const sign = difference > 0 ? "+" : difference < 0 ? "\u2212" : "\u00B1";
+  const percent = Number.isFinite(discrepancy.difference_percent)
+    ? " (" + formatPercent(discrepancy.difference_percent) + ")"
+    : "";
+  return sign + formatTokens(Math.abs(difference)) + " tokens" + percent;
+}
+
+const DISCREPANCY_DIRECTIONS = {
+  under: "the app estimated less than the provider reported",
+  over: "the app estimated more than the provider reported",
+  match: "the estimate matched the provider",
+};
+
+function analyticsCopyButton(hasData) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "analytics__copy";
+  button.dataset.action = "copy-analysis";
+  button.innerHTML = iconMarkup("copy") + "<span>Copy Analysis</span>";
+
+  if (hasData) {
+    button.title = "Copy this turn's full analytics report as plain text";
+    button.setAttribute("aria-label", "Copy the analytics report");
+    return button;
+  }
+
+  // No turn is selected or it has no token or context data, so there is nothing
+  // that could be copied yet.
+  button.disabled = true;
+  button.title = "Nothing to copy yet: select an answer that has token or context data";
+  button.setAttribute("aria-label", "Copy the analytics report (nothing to copy)");
+  return button;
+}
+
+function analyticsReportText(snapshot) {
+  const { conversation, message, context, usage, calls, selectedIndex, call } = snapshot;
+  if (!message || (!context && !usage)) return null;
+
+  const estimate = call ? call.estimate : null;
+  const budget = call ? call.budget : null;
+  const actual = call ? call.actual : null;
+  const discrepancy = call ? call.discrepancy : null;
+  const totals = usage && usage.totals ? usage.totals : {};
+  const tokenizerAvailable = estimate
+    ? estimate.tokenizer_available
+    : context
+      ? context.tokenizer_available
+      : null;
+  const rejectedCalls = calls.filter((item) => item.rejected).length;
+  const reducedCalls = Number.isFinite(context && context.reduced_calls)
+    ? context.reduced_calls
+    : calls.length > 0
+      ? calls.filter((item) => item.reduced).length
+      : null;
+
+  const lines = [];
+  lines.push("ANALYTICS REPORT", "================", "");
+  lines.push(reportField("Generated", new Date().toLocaleString()));
+  lines.push(reportField("Application", "Token Harbor Chat"));
+  lines.push(
+    "Estimated values were counted by this app before the request; actual values were reported by the provider after it."
+  );
+  lines.push("");
+
+  lines.push(
+    ...reportSection("GENERAL", [
+      reportField("Conversation", (conversation && conversation.title) || null),
+      reportField("Turn", analyticsTurnTitle(conversation, message)),
+      reportField("Turn recorded at", message.at ? new Date(message.at).toLocaleString() : null),
+      reportField("Turn failed before answering", message.error === true ? "yes" : "no"),
+      reportField("Model", context ? context.model : null),
+      "Provider: N/A (the API reports the model id only)",
+      reportField(
+        "Selected model request",
+        calls.length > 0 ? "Call " + (selectedIndex + 1) + " of " + calls.length : null
+      ),
+      reportField("Model requests in this turn", usage ? usage.model_calls : null),
+      reportField(
+        "Stored messages in this conversation",
+        conversation ? conversation.messages.length : null
+      ),
+      reportField("Newest messages replayed as history", LIMITS.historySentToApi),
+    ])
+  );
+
+  lines.push(
+    ...reportSection("TOKEN USAGE", [
+      reportField("Estimated input (app estimate)", estimate ? estimate.estimated_input_tokens : null),
+      reportField("Measured text tokens (tokenizer)", estimate ? estimate.text_token_count : null),
+      reportField(
+        "Estimated request overhead",
+        estimate && estimate.breakdown ? estimate.breakdown.estimated_overhead_tokens : null
+      ),
+      reportField("Actual input (provider)", actual ? actual.input_tokens : null),
+      reportField("Actual output (provider)", actual ? actual.output_tokens : null),
+      reportField("Actual total (provider)", actual ? actual.total_tokens : null),
+      reportField("Cached input (provider)", actual ? actual.cached_input_tokens : null),
+      reportField("Reasoning tokens (provider)", actual ? actual.reasoning_tokens : null),
+      reportField("Estimation discrepancy", discrepancy ? analyticsDiscrepancyText(discrepancy) : null),
+      reportField(
+        "Discrepancy direction",
+        discrepancy ? DISCREPANCY_DIRECTIONS[discrepancy.direction] : null
+      ),
+      reportField("Turn input, all requests (provider)", usage ? totals.input_tokens : null),
+      reportField("Turn output, all requests (provider)", usage ? totals.output_tokens : null),
+      reportField("Turn total, all requests (provider)", usage ? totals.total_tokens : null),
+      reportField("Turn total derived by the app", usage ? (usage.derived_total ? "yes" : "no") : null),
+      reportField("Usage availability", usage ? analyticsUsageState(usage).text : null),
+      reportField("Tool executions in this turn", usage ? usage.tool_calls : null),
+      reportField("Tokenizer backend", context ? context.tokenizer_backend : null),
+      reportField("Tokenizer name", context ? context.tokenizer_name : null),
+      reportField("Tokenizer label", context ? context.tokenizer_label : null),
+      reportField("Tokenizer compatibility", analyticsCompatibility(estimate).text),
+      reportField("Estimation status", analyticsEstimation(estimate).text),
+      reportField(
+        "Tokenizer loaded",
+        tokenizerAvailable === null ? null : tokenizerAvailable ? "yes" : "no"
+      ),
+      reportField("Estimation method", context ? context.estimation_method : null),
+      reportField("Method notes and limitations", estimate ? estimate.estimation_notes : null),
+    ])
+  );
+
+  // The breakdown behind those numbers, with the measurement named per row, so an
+  // estimate can never be read as a measurement or the other way round.
+  const breakdownRows = analyticsBreakdownRows(estimate);
+  if (breakdownRows.length > 0) {
+    const rowLines = breakdownRows.map(
+      (row) =>
+        row.label +
+        ": " +
+        (row.tokens === null ? USAGE_UNAVAILABLE : formatTokens(row.tokens)) +
+        " (" +
+        row.measurementLabel +
+        ")"
+    );
+    rowLines.push(
+      reportField("Measured text tokens", estimate.text_token_count),
+      reportField("Estimated request overhead", estimate.breakdown.estimated_overhead_tokens),
+      reportField("Total estimated request input", estimate.estimated_input_tokens),
+      reportField("Provider-reported actual input", actual ? actual.input_tokens : null),
+      reportField(
+        "Unaccounted difference",
+        discrepancy ? analyticsDiscrepancyText(discrepancy) : null
+      ),
+      "Note: tokenizer rows count the exact text this app sent; estimated rows are documented rules; the unknown row cannot be measured from here.",
+      "Note: the unaccounted difference is the provider's count minus this estimate, and it is not assigned to any single component."
+    );
+    if (actual && Number.isFinite(actual.cached_input_tokens)) {
+      rowLines.push(
+        reportField("Cached input (provider, reported separately)", actual.cached_input_tokens) +
+          " - already inside the actual input, never added to it again"
+      );
+    }
+    lines.push(...reportSection("TOKEN ESTIMATION BREAKDOWN (SELECTED REQUEST)", rowLines));
+  }
+
+  lines.push(
+    ...reportSection("CONTEXT BUDGET", [
+      reportField("Context window", budget ? budget.context_window_tokens : null),
+      reportField("Context window source", analyticsWindowSource(budget)),
+      reportField("Context window note", budget ? budget.context_window_note : null),
+      reportField(
+        "Output allowance, reserved for the answer",
+        budget ? budget.max_output_tokens : null
+      ),
+      reportField("Safety margin", budget ? budget.context_safety_margin_tokens : null),
+      reportField("Maximum input budget", budget ? budget.max_input_budget_tokens : null),
+      reportField("Estimated input", budget ? budget.estimated_input_tokens : null),
+      reportField("Remaining input budget", budget ? budget.remaining_input_budget_tokens : null),
+      reportField("Over budget by", budget ? budget.over_budget_tokens : null),
+      reportField(
+        "Budget utilization",
+        budget ? budget.budget_utilization_percent : null,
+        formatPercent
+      ),
+      reportField("Budget status", analyticsBudgetState(budget).text),
+      reportField("Request accepted for sending", budget ? (budget.accepted ? "yes" : "no") : null),
+      reportField(
+        "Estimation confidence",
+        budget && budget.estimation_confidence
+          ? budget.estimation_confidence
+          : estimate
+            ? estimate.estimation_confidence
+            : null
+      ),
+      reportField("Budget caveat", budget ? budget.budget_caveat : null),
+      reportField("Budget configuration problem", budget ? budget.configuration_problem : null),
+    ])
+  );
+
+  const callLines = [];
+  calls.forEach((item, index) => {
+    const itemEstimate = item.estimate;
+    const itemActual = item.actual;
+    const itemBudget = item.budget;
+    const dropped = Number.isFinite(item.dropped_messages) ? item.dropped_messages : 0;
+    const number = Number.isFinite(item.call_index) ? item.call_index : index + 1;
+    if (index > 0) callLines.push("");
+    callLines.push(
+      "Call " +
+        number +
+        " - " +
+        contextCallLabel(index, calls.length) +
+        (index === selectedIndex ? "  [shown in the panel]" : "")
+    );
+    callLines.push(
+      "  " +
+        reportField(
+          "Estimated input (app estimate)",
+          itemEstimate ? itemEstimate.estimated_input_tokens : null
+        )
+    );
+    callLines.push("  " + reportField("Actual input (provider)", itemActual ? itemActual.input_tokens : null));
+    callLines.push("  " + reportField("Actual output (provider)", itemActual ? itemActual.output_tokens : null));
+    callLines.push("  " + reportField("Actual total (provider)", itemActual ? itemActual.total_tokens : null));
+    callLines.push(
+      "  " +
+        reportField(
+          "Tool definitions counted (schemas plus wrapper)",
+          itemEstimate ? itemEstimate.tool_definitions_tokens : null
+        )
+    );
+    callLines.push(
+      "  " +
+        reportField(
+          "Estimation discrepancy",
+          item.discrepancy ? analyticsDiscrepancyText(item.discrepancy) : null
+        )
+    );
+    callLines.push("  " + reportField("Rejected before sending", item.rejected ? "yes" : "no"));
+    callLines.push(
+      "  " + reportField("Accepted for sending", itemBudget ? (itemBudget.accepted ? "yes" : "no") : null)
+    );
+    callLines.push(
+      "  " +
+        reportField(
+          "Budget utilization",
+          itemBudget ? itemBudget.budget_utilization_percent : null,
+          formatPercent
+        )
+    );
+    if (item.reduced) {
+      callLines.push(
+        "  " +
+          reportField(
+            "Saved history dropped",
+            dropped + (dropped === 1 ? " older message left out" : " older messages left out")
+          )
+      );
+      if (item.reduction_note) callLines.push("  " + reportField("Reduction note", item.reduction_note));
+    }
+  });
+  lines.push(
+    ...reportSection(
+      "API CALL BREAKDOWN",
+      calls.length > 0 ? callLines : ["N/A (no model request is recorded for this turn)"]
+    )
+  );
+
+  // The same arithmetic over the whole turn, counted once per request that was
+  // really sent, so a per-call breakdown is never added up twice.
+  const estimateTotals = context ? context.estimate_totals : null;
+  if (estimateTotals && Number.isFinite(estimateTotals.requests) && estimateTotals.requests > 1) {
+    lines.push(
+      ...reportSection("TURN ESTIMATE TOTALS", [
+        reportField("Model requests added up", estimateTotals.requests),
+        reportField("Measured text tokens, all requests", estimateTotals.text_token_count),
+        reportField(
+          "Estimated request overhead, all requests",
+          estimateTotals.estimated_overhead_tokens
+        ),
+        reportField("Estimated input, all requests", estimateTotals.estimated_input_tokens),
+        "Note: each request of this turn is counted exactly once; no per-call breakdown is shared between calls.",
+      ])
+    );
+  }
+
+  lines.push(
+    ...reportSection("TOOL USAGE", [
+      reportField("Tool executions in this turn", usage ? usage.tool_calls : null),
+      reportField("Model requests in this turn", usage ? usage.model_calls : null),
+      reportField(
+        "Tool definitions sent with the selected request",
+        estimate ? estimate.tool_definition_count : null
+      ),
+      reportField(
+        "Tool definitions counted (schemas plus wrapper)",
+        estimate ? estimate.tool_definitions_tokens : null
+      ),
+      "Tool names per execution: N/A (the analytics snapshot keeps the tool count, not per-tool records)",
+      "Execution status and timing: N/A (not part of the analytics snapshot)",
+    ])
+  );
+
+  lines.push(
+    ...reportSection("CONTEXT MANAGEMENT", [
+      reportField(
+        "Stored messages in this conversation",
+        conversation ? conversation.messages.length : null
+      ),
+      reportField("Messages counted in the selected request", estimate ? estimate.message_count : null),
+      reportField("System prompt (app estimate)", estimate ? estimate.system_prompt_tokens : null),
+      reportField("Saved conversation history (app estimate)", estimate ? estimate.history_tokens : null),
+      reportField("Other input this turn (app estimate)", estimate ? estimate.other_input_tokens : null),
+      reportField(
+        "Newest user message (app estimate)",
+        estimate ? estimate.latest_user_message_tokens : null
+      ),
+      reportField("Context growth across the turn", context ? context.context_growth_tokens : null),
+      reportField("Requests that dropped saved history", reducedCalls),
+      reportField("Requests rejected before sending", calls.length > 0 ? rejectedCalls : null),
+      reportField("Newest messages replayed as history", LIMITS.historySentToApi),
+      "Messages omitted by the history limit: N/A (the snapshot records the limit, not how many older messages were left out)",
+    ])
+  );
+
+  const warnings = [];
+  if (message.error === true) {
+    warnings.push("The request failed: " + (message.detail || "the server did not explain why."));
+  }
+  if (context && context.rejected) {
+    warnings.push("The context budget refused the last request before it was sent.");
+  }
+  if (rejectedCalls > 0) {
+    warnings.push(
+      rejectedCalls === 1
+        ? "1 model request was refused locally by the context budget and never sent."
+        : rejectedCalls + " model requests were refused locally by the context budget and never sent."
+    );
+  }
+  if (
+    estimate &&
+    (estimate.estimation_status !== "exact" || estimate.tokenizer_compatibility !== "compatible")
+  ) {
+    warnings.push(
+      "Tokenizer fallback: estimates come from " +
+        (estimate.tokenizer_label || analyticsTokenizerName(estimate, context)) +
+        " (" +
+        analyticsEstimation(estimate).text.toLowerCase() +
+        ", " +
+        analyticsCompatibility(estimate).text.toLowerCase() +
+        ")."
+    );
+  }
+  if (usage && !usage.available) {
+    warnings.push("The provider reported no token usage for this turn, so no actual counts exist.");
+  } else if (usage && !usage.complete) {
+    warnings.push("The provider reported usage only partly, so some actual counts are N/A.");
+  }
+  if (usage && usage.derived_total) {
+    warnings.push(
+      "The turn total was derived by adding the reported input and output, because no total was sent."
+    );
+  }
+  if (budget && budget.configuration_problem) {
+    warnings.push("Context budget configuration: " + budget.configuration_problem);
+  }
+  if (budget && budget.budget_caveat) {
+    warnings.push("Context budget caveat: " + budget.budget_caveat);
+  }
+  lines.push(
+    ...reportSection("WARNINGS", warnings.length > 0 ? warnings.map((item) => "- " + item) : ["None."])
+  );
+  lines.push(
+    "End of report. Estimated values are this app's own counts; actual values were reported by the provider."
+  );
+
+  // The sections already carry their own spacing, so only runs of blank lines
+  // are collapsed. The report stays copy-paste friendly either way.
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+}
+
+// Copying is refused while a request is in flight, so the clipboard can never
+// receive a snapshot that the arriving answer is about to replace.
+async function copyAnalyticsReport(button) {
+  if (ui.busy) {
+    toast("Wait for the current answer to finish, then copy the analysis.", "error");
+    return;
+  }
+
+  const text = analyticsReportText(analyticsSnapshot());
+  if (!text) {
+    toast("There is no analytics to copy for this turn.", "error");
+    return;
+  }
+
+  const ok = await copyText(text);
+  markActionDone(button, ok ? "Copied!" : "Failed");
+  toast(ok ? "Analytics report copied" : "Copying is blocked by the browser", ok ? "info" : "error");
+  if (ok) announce("Analytics report copied to the clipboard");
 }
 
 function updateSelectedTurn() {
@@ -2001,13 +2657,18 @@ function closeAnalytics() {
   if (el.analyticsBtn) el.analyticsBtn.setAttribute("aria-expanded", "false");
 }
 
-function onAnalyticsClick(event) {
+async function onAnalyticsClick(event) {
   const trigger = event.target.closest("[data-action]");
   if (!trigger) return;
   const action = trigger.dataset.action;
 
   if (action === "close-analytics") {
     closeAnalytics();
+    return;
+  }
+
+  if (action === "copy-analysis") {
+    await copyAnalyticsReport(trigger);
     return;
   }
 

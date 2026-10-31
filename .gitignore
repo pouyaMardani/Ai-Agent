@@ -1,6 +1,9 @@
 # Local secrets - never commit this file
 .env
 
+# Downloaded tokenizer files (see docs/CONTEXT_BUDGET.md for the one-time setup)
+tokenizers/
+
 # Python cache files
 __pycache__/
 *.pyc

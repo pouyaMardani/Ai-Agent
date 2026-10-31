@@ -12,13 +12,14 @@ the context it sent.
 | `app.py` | HTTP layer only: the `ChatRequest` model, the static mount, the `/`, `/api/config` and `/api/chat` routes, the 413/502 mapping, and `uvicorn` startup. |
 | `config.py` | `.env` loading, the environment variable names and defaults, `get_settings()`, `create_client()`, and the safe error messages (`friendly_error`). |
 | `agent/chat.py` | `SYSTEM_PROMPT`, the tool registry, `execute_tool_call()`, browser history filtering (`keep_history`) and `run_chat_with_tools()`, the model request loop. |
-| `agent/tokenizer.py` | Choosing a tokenizer (tiktoken, Hugging Face, or the character heuristic), counting text, and describing how far the count can be trusted. |
+| `agent/tokenizer.py` | Choosing a tokenizer (the verified DeepSeek V4.1 tokenizer through Hugging Face, tiktoken, or the character heuristic), counting text, and describing how far the count can be trusted. |
 | `agent/token_usage.py` | Reading the usage block of a completion, aggregating it across calls, and keeping "not reported" different from `0`. |
 | `agent/context_budget.py` | Estimating a prepared request, comparing it with the configured budget, trimming history safely, and building the per-call and per-answer context records. |
 | `tools/write_file.py` | The `write_file` tool: workspace-only paths, suffix and size rules, no overwrite without `overwrite=true`, atomic write. |
 | `tools/web_search.py` | The `web_search` tool: Tavily search, result truncation, and results marked as untrusted data. |
 | `static/` | The front end (`index.html`, `app.css`, `js/app.js`, `js/store.js`, `js/icons.js`). It renders usage, estimates and the analytics panel from the JSON the API returns. |
 | `docs/` | This file, the context-budget deep dive (`CONTEXT_BUDGET.md`) and the earlier backend report. |
+| `INITIAL_SETUP.md` | The complete setup guide for a new machine: prerequisites, virtual environment, dependencies, the one-time DeepSeek V4.1 tokenizer download, `.env` keys, how to run the app, and troubleshooting. |
 
 `config.py` imports nothing from the project; `agent/tokenizer.py` imports
 `config`; `agent/context_budget.py` imports both; `agent/chat.py` imports the
@@ -95,19 +96,34 @@ Rules that keep the numbers honest:
 metadata (`backend`, `name`, `method`, `compatibility`, `status`, `is_exact`,
 `available`, `limitations`). `load_tokenizer()` picks one, in this order:
 
-1. An explicitly configured Hugging Face tokenizer (`TOKENIZER_NAME`), loaded from
-   local files only unless `TOKENIZER_LOCAL_ONLY` is false.
-2. tiktoken: `encoding_for_model()` for the model id, which is treated as exact.
-3. tiktoken with an explicitly configured or default encoding, labelled
-   `estimated` because matching the model was not verified.
-4. The character heuristic (about four characters per token), labelled
-   `heuristic` with its limitations in words.
+1. **The verified DeepSeek V4.1 tokenizer** (backend `huggingface`): the official
+   `tokenizer.json` and `tokenizer_config.json` of Hugging Face
+   `deepseek-ai/DeepSeek-V4.1-Flash`, read from `TOKENIZER_MODEL_PATH`
+   (`./tokenizers/deepseek-v4.1` by default). The files are hash-checked against the
+   published git blob ids, and only then is the count called `exact` for the model
+   this app sends requests to. A directory holding different files is loaded but
+   labelled `unverified`.
+2. **An explicitly configured tokenizer** (`TOKENIZER_NAME`), from local files only
+   unless `TOKENIZER_LOCAL_ONLY` is false, similarly labelled.
+3. **tiktoken**, when this installation knows the model
+   (`tiktoken.encoding_for_model`). tiktoken has no DeepSeek encoding, so for this
+   app's model a tiktoken count is always an approximation.
+4. **The character heuristic** (about four characters per token), the last resort,
+   labelled `heuristic` with its limitations in words.
 
-tiktoken and `transformers` are imported late and may be missing; the app then
-falls back without failing. Descriptors are cached per model and configuration,
-and nothing is downloaded while a request is being answered. `is_exact` is true
-only when the app has evidence the tokenizer matches the model, and every
-estimate says which method produced it.
+`TOKENIZER_BACKEND=huggingface` tries the two Hugging Face sources above;
+`TOKENIZER_BACKEND=tiktoken` tries only tiktoken; `TOKENIZER_BACKEND=heuristic` goes
+straight to the fallback. When an explicitly selected backend is unavailable, the
+reason is logged, recorded in `estimation_notes`, and the numbers shown are the
+heuristic ones - never a different tokenizer presented as the one that was asked
+for.
+
+`tiktoken`, `transformers` and `tokenizers` are imported late and may be missing;
+the app then falls back without failing. Descriptors are cached per model and
+configuration, so tokenizer files are read once per process, and nothing is
+downloaded while a request is being answered. `is_exact` is true only when the app
+has evidence the tokenizer matches the model, and every estimate says which method
+produced it.
 
 ## Context budget (what this app allowed itself to send)
 
@@ -128,6 +144,12 @@ remaining_input_budget_tokens  = max(0, max_input_budget_tokens - estimated_inpu
   tokens of overhead per message and per tool schema, and breaks the result into
   system prompt, saved history, tool definitions, other input, and the newest user
   message. A component that is not part of the request is `None`, not `0`.
+* The same pass records two numbers that must not be confused: `text_token_count`
+  (what the active tokenizer counted in the request text) and
+  `estimated_input_tokens` (that text plus the documented structural overhead).
+  `breakdown.rows` names every component of both, each row saying whether it was
+  counted with the tokenizer, estimated from a rule, or is unknown because the
+  provider's own serialization is not visible from here.
 * `enforce_context_budget()` trims from the front of the saved history only, one
   message at a time, re-estimating after each removal. The system prompt, the
   newest user message and this turn's tool messages are never dropped, which also

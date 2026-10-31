@@ -63,13 +63,19 @@ The remaining budget is clamped at zero for readability, but an over-budget
 request still shows exactly how far over it is (`over_budget_tokens`), because a
 negative number would otherwise be hidden or look like zero.
 
-## 2. Estimated input tokens vs. actual input tokens
+## 2. Three token numbers that must not be confused
 
-* **Estimated input tokens** - produced by `estimate_context()` from the exact
-  messages and tool definitions that are about to be sent. This is a *guess made
-  before* the call, clearly labelled as an estimate in the UI.
-* **Actual input tokens** - reported by the provider in the response
-  (`usage.prompt_tokens` and friends). This is a *measurement made after* the call.
+| | Number | Where it comes from | Field |
+| --- | --- | --- | --- |
+| **A** | Text token count | The active tokenizer, over the exact request text | `estimate.text_token_count` |
+| **B** | Request-level estimated input | A plus documented structural overhead (message delimiters, tool-schema wrapper), produced by `estimate_context()` before the call | `estimate.estimated_input_tokens` |
+| **C** | Provider-reported actual input | Token Harbor, after it serialised and counted the request | `context.calls[i].actual.input_tokens` |
+
+A measures text this app can see, B adds documented estimates on top of A so it
+describes a *request* rather than a measurement of one, and C is the provider's own
+measurement of its own serialization. None of them stands in for another: B is
+never presented as a provider count, C never becomes an estimate, and the panel
+always says which is which.
 
 They are kept in separate fields on purpose:
 
@@ -97,47 +103,70 @@ and adds no number the compact cards do not already have.
 | Tool definitions | `tool_definitions_tokens` | The JSON schemas of the tools offered with *this* call, when tools are offered. |
 | This turn | `other_input_tokens` | The newest user message, assistant tool-call messages, tool results and the loop's reminder. |
 
-Plus a small documented overhead per message (role and delimiters) and per tool
-schema (name and wrapper). Every message is converted to text exactly once, so
-nothing is counted twice.
+Within a message the parts (role, content, tool-call arguments, tool-call id) are
+counted separately and exactly once, which is what the breakdown in
+[3.3](#33-the-token-estimation-breakdown) reports. Those text parts make up
+`text_token_count` (metric A). The documented overhead per message (role
+delimiters) and per tool schema (name and wrapper) is added on top and recorded
+separately, which is what makes `estimated_input_tokens` (metric B) a
+request-level number instead of a measurement.
 
 A component that is genuinely absent (for example tool schemas on a call that may
 not use tools) is reported as `null`, which means "not present", not "0 tokens".
 
 ### 3.1 Which tokenizer is used
 
-`load_tokenizer(model)` (a thin wrapper over `select_tokenizer(model)`) picks a
-tokenizer in this order, highest priority first:
+`load_tokenizer(model)` picks a tokenizer in this order, highest priority first:
 
-1. **Hugging Face**, when `TOKENIZER_NAME` is set and that tokenizer is *already
-   present locally* and the `huggingface` backend is allowed. Loading is
-   `local_files_only` by default, so an identifier that is not cached simply fails
-   and the next candidate is tried.
-2. **tiktoken**, when this tiktoken installation recognises the configured model
-   (`tiktoken.encoding_for_model`). This is the only case this app calls
-   `compatible`, because it is the only case where the match is verifiable here.
-   A routing suffix such as `:free` is stripped first, because it selects a
-   provider tier, not a different tokenizer.
-3. **tiktoken with an explicitly configured encoding** (`TOKENIZER_NAME`, or
+1. **The verified DeepSeek V4.1 tokenizer** (backend `huggingface`): the official
+   `tokenizer.json` and `tokenizer_config.json` of `deepseek-ai/DeepSeek-V4.1-Flash`,
+   read from the local directory in `TOKENIZER_MODEL_PATH`. The two files are checked
+   against the size and git blob id published by that repository, and only that
+   combination makes the count `compatible` and `exact` for the model this app sends
+   requests to. A directory holding different files is still loaded, but labelled
+   `unverified` (see [7.2](#72-getting-the-deepseek-tokenizer-files)).
+2. **An explicitly configured tokenizer** (`TOKENIZER_NAME`, an id or a path), from
+   local files only unless `TOKENIZER_LOCAL_ONLY` is false, labelled `unverified`
+   unless it is one of the verified DeepSeek V4.1 repositories.
+3. **tiktoken**, when this tiktoken installation recognises the configured model
+   (`tiktoken.encoding_for_model`). No tiktoken encoding is DeepSeek's tokenizer, so
+   for this app's model a tiktoken count is always labelled `estimated`. A routing
+   suffix such as `:free` is stripped first, because it selects a provider tier, not
+   a different tokenizer.
+4. **tiktoken with an explicitly configured encoding** (`TOKENIZER_NAME`, or
    `cl100k_base` when the backend was requested by name), labelled `unverified`.
-4. **The character heuristic**, always available and clearly labelled approximate.
+5. **The character heuristic**, always available and clearly labelled approximate.
 
-Each descriptor is cached per `(model, backend, TOKENIZER_NAME, local_only)` so a
-slow tokenizer load happens once per configuration, not once per call.
+`TOKENIZER_BACKEND` narrows that list: `auto` walks it, `huggingface` allows steps
+1-2 only, `tiktoken` steps 3-4 only, and `heuristic` goes straight to step 5. When
+an explicitly selected backend cannot be loaded, the reason is logged and written
+into `estimation_notes`, and the heuristic supplies the numbers - never a different
+tokenizer presented as the one that was asked for.
+
+Each descriptor is cached per
+`(model, backend, TOKENIZER_NAME, TOKENIZER_MODEL_PATH, local_only)`, so a slow
+tokenizer load happens once per process, not once per call.
 
 ### 3.2 What the count is called
 
 | Backend | Compatibility | Status | Method string |
 | --- | --- | --- | --- |
-| Hugging Face, id equals the model | `compatible` | `exact` | `huggingface:<id>` |
-| Hugging Face, id set but unverified | `unverified` | `estimated` | `huggingface:<id>` |
-| tiktoken knows the model | `compatible` | `exact` | `tiktoken:<encoding>` |
+| Verified DeepSeek V4.1 files, verified model | `compatible` | `exact` | `huggingface:deepseek-ai/DeepSeek-V4.1-Flash` |
+| Hugging Face, any other source | `unverified` | `estimated` | `huggingface:<name>` |
+| tiktoken knows the model (not a DeepSeek V4.1 model) | `compatible` | `exact` | `tiktoken:<encoding>` |
+| tiktoken used with this app's DeepSeek model | `unverified` | `estimated` | `tiktoken:<encoding>` |
 | tiktoken, encoding unverified | `unverified` | `estimated` | `tiktoken:<encoding>` |
 | character heuristic | `unsupported` | `heuristic` | `heuristic` |
 
 The status is what the UI repeats: `exact token count`, `tokenizer estimate` or
 `heuristic estimate`. Only a count this app can point at evidence for is ever
 called exact; everything else says so plainly.
+
+An exact count of the *text* is still not an exact count of the *request*: the
+per-message and per-tool overhead added on top is a small approximation, and the
+provider's own measurement covers its own serialisation of the request as well.
+`estimation_notes` says this in words, and `discrepancy` compares the estimate with
+what the provider reported once the call is done.
 
 The heuristic itself is one documented line:
 
@@ -157,10 +186,64 @@ tokens = max(1, ceil(characters / 4))   # English prose average
 * Estimates never include provider-side overhead that is not part of the messages
   (for example some providers add tokens per image or per tool call). The safety
   margin exists partly for exactly this.
-* No extra API call and no download is ever made to estimate context size.
-* `tiktoken` and `transformers` are **not** dependencies of this project; when
-  neither is installed and no name is configured, the heuristic is the answer, and
-  the panel says so instead of guessing which method "should" have been used.
+* No extra API call is ever made to estimate context size, and tokenizer files are
+  fetched once, by hand, during the setup in
+  [7.2](#72-getting-the-deepseek-tokenizer-files).
+* tiktoken has no DeepSeek encoding, so a tiktoken count for this app's model is an
+  approximation: OpenAI API compatibility does not imply an OpenAI tokenizer.
+* `tiktoken`, `transformers` and `tokenizers` are **not** dependencies of this
+  project. When none of them is installed and no tokenizer files are present, the
+  heuristic is the answer, and the panel says so instead of guessing which method
+  "should" have been used.
+
+### 3.3 The token estimation breakdown
+
+Every call stores `estimate.breakdown`, the decomposition behind metrics A and B:
+
+```json
+"breakdown": {
+  "rows": [
+    { "key": "system_content", "tokens": 348, "measurement": "tokenizer" },
+    { "key": "user_content", "tokens": 41, "measurement": "tokenizer" },
+    { "key": "tool_call_arguments", "tokens": 0, "measurement": "tokenizer" },
+    { "key": "tool_call_ids", "tokens": 0, "measurement": "tokenizer" },
+    { "key": "role_labels", "tokens": 6, "measurement": "tokenizer" },
+    { "key": "tool_definitions", "tokens": 394, "measurement": "tokenizer" },
+    { "key": "message_overhead", "tokens": 8, "measurement": "estimated" },
+    { "key": "tool_definition_overhead", "tokens": 16, "measurement": "estimated" },
+    { "key": "provider_serialization", "tokens": null, "measurement": "unknown" }
+  ],
+  "estimated_overhead_tokens": 24,
+  "tool_schema_count": 2
+}
+```
+
+| Row | Measurement | What it is |
+| --- | --- | --- |
+| `system_content`, `user_content`, `assistant_content`, `tool_content`, `other_message_content` | `tokenizer` | The content text of each message, grouped by the role that carried it. |
+| `structured_content` | `tokenizer` | Content that is not a string, counted as the JSON this app sends; how a provider counts images inside it is not something this app knows. |
+| `tool_call_arguments` | `tokenizer` | The serialised `tool_calls` of an assistant message. |
+| `tool_call_ids` | `tokenizer` | The id that ties a tool result to the call it answers. |
+| `role_labels` | `tokenizer` | The role strings (`system`, `user`, `tool`, ...) sent with each message. |
+| `tool_definitions` | `tokenizer` | The JSON schema of every tool offered with this call. |
+| `message_overhead` | `estimated` | `MESSAGE_OVERHEAD_TOKENS` (4) per message, for role delimiters. |
+| `tool_definition_overhead` | `estimated` | `TOOL_OVERHEAD_TOKENS` (8) per schema, for the function wrapper. |
+| `provider_serialization` | `unknown` | The provider's chat template, separators and special tokens. Not visible from this app, so it carries no number rather than a guess. |
+
+The rows always add up: the `tokenizer` rows sum to `text_token_count` (A) and the
+`estimated` rows to `breakdown.estimated_overhead_tokens`, so A + overhead = B. The
+panel shows the same rows under **Token Estimation Breakdown**, with a totals table
+for A, the overhead, B, C, and the *unaccounted difference* (`C - B`). That
+difference is reported as a number only: it is never assigned to a component,
+because doing so would mean guessing what Token Harbor does internally.
+
+Cached input is an informational metric of its own. When the provider reports it,
+the panel and the copied report show it on its own line and never add it to the
+actual input, because it is already inside it.
+
+A turn with several model requests keeps one breakdown per request, and
+`context.estimate_totals` adds those requests up once each - a request the budget
+refused is not a model call and is left out - so no breakdown is counted twice.
 
 ## 4. How the safety margin works
 
@@ -259,14 +342,19 @@ matching `configuration_problem` text instead of pretending the budget works.
 
 ### 7.1 Tokenizer settings
 
-These are optional. Without them the app still works: it uses the best tokenizer it
-can verify and falls back to the documented heuristic.
+These are optional. Without them the app looks for the verified DeepSeek V4.1
+tokenizer in the default directory, and otherwise falls back to the documented
+heuristic.
 
 ```dotenv
 # auto | huggingface | tiktoken | heuristic
 TOKENIZER_BACKEND=auto
 
-# An encoding name (tiktoken, e.g. o200k_base) or a Hugging Face tokenizer id.
+# Local directory holding the verified DeepSeek V4.1 tokenizer files.
+TOKENIZER_MODEL_PATH=./tokenizers/deepseek-v4.1
+
+# A second, explicit source: a Hugging Face tokenizer id or path. With the
+# tiktoken backend, this is the encoding name (for example o200k_base).
 TOKENIZER_NAME=
 
 # Never download a tokenizer at request time.
@@ -275,13 +363,41 @@ TOKENIZER_LOCAL_ONLY=true
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `TOKENIZER_BACKEND` | `auto` | `auto` tries Hugging Face (when a name is set), then tiktoken, then the heuristic. Any unrecognised value falls back to the default, so a typo cannot disable estimation. |
-| `TOKENIZER_NAME` | unset | With `auto`, this is the Hugging Face tokenizer id that must already exist locally. With `tiktoken`, it is the encoding name. When it is set but cannot be used, the failure is recorded in `estimation_notes` rather than hidden. |
-| `TOKENIZER_LOCAL_ONLY` | `true` | `true`, `1`, `yes`, `on` and `false`, `0`, `no`, `off` are recognised. Anything else keeps the default. |
+| `TOKENIZER_BACKEND` | `auto` | `auto` prefers the verified DeepSeek V4.1 tokenizer, then an explicitly named one, then tiktoken, then the heuristic. `huggingface` and `tiktoken` restrict the app to that one backend. Any unrecognised value falls back to the default, so a typo cannot disable estimation. |
+| `TOKENIZER_MODEL_PATH` | `./tokenizers/deepseek-v4.1` | Directory holding `tokenizer.json` and `tokenizer_config.json`. A relative path is resolved against the folder that contains `app.py`, so no machine-specific path is needed. Missing files are named in the error and in `estimation_notes`. |
+| `TOKENIZER_NAME` | unset | A Hugging Face tokenizer id, tried after `TOKENIZER_MODEL_PATH`. With `tiktoken`, it is the encoding name. When it cannot be used, the failure is recorded in `estimation_notes` rather than hidden. |
+| `TOKENIZER_LOCAL_ONLY` | `true` | `true`, `1`, `yes`, `on` and `false`, `0`, `no`, `off` are recognised. Anything else keeps the default. `false` allows a Hugging Face id to be fetched once and then reused from the Hugging Face cache. |
 
-Installing `tiktoken` (or `transformers` for a Hugging Face tokenizer) is enough to
-activate the better backends; nothing else changes. `tiktoken` matching the
-configured model is the only path this app describes as an exact count.
+Installing `transformers` (its `AutoTokenizer` is the integration used first) or the
+smaller `tokenizers` package is enough to read `tokenizer.json`; `tiktoken` is a
+separate backend. The verified DeepSeek V4.1 files are the only path this app
+describes as an exact token count for its configured model.
+
+### 7.2 Getting the DeepSeek tokenizer files
+
+This is a one-time, manual setup: the app never downloads a tokenizer while it is
+answering a request. The tokenizer that ships with the configured model is the
+official one in the Hugging Face repository `deepseek-ai/DeepSeek-V4.1-Flash`;
+`deepseek-ai/DeepSeek-V4.1-Flash-1017` ships byte-identical files (same sizes and
+same git blob ids, checked against both repositories), so either gives the same
+tokenizer.
+
+```bash
+pip install huggingface_hub transformers
+hf download deepseek-ai/DeepSeek-V4.1-Flash tokenizer.json tokenizer_config.json --local-dir ./tokenizers/deepseek-v4.1
+```
+
+`pip install huggingface_hub tokenizers` does the same job with a smaller loader if
+`transformers` is not wanted: both packages read the same `tokenizer.json`. Older
+`huggingface_hub` releases spell that second command `huggingface-cli`, and the two
+files can also be downloaded by hand from the repository's *Files and versions*
+page. Only these two files are needed (about 6.4 MB); the model weights are not.
+
+Restart the app afterwards. If the files are the official ones, the panel shows
+`Hugging Face (deepseek-ai/DeepSeek-V4.1-Flash)`, `Matches this model` and `Exact
+token count`, and the console prints the active backend once per process. If the
+files are missing or different, the reason appears in `estimation_notes` and the
+counts stay labelled approximate.
 
 The active model (`MODEL_ID`) and every budget value are shown in the panel, so you
 can confirm what was actually in force for a response. Changing `.env` requires
@@ -324,7 +440,11 @@ an optional `context`:
     "calls": [
       {
         "call_index": 1,
-        "estimate": { "estimated_input_tokens": 812, "system_prompt_tokens": 348,
+        "estimate": { "estimated_input_tokens": 812, "text_token_count": 784,
+                      "breakdown": { "rows": [ { "key": "system_content", "tokens": 348,
+                                                 "measurement": "tokenizer" }, "..." ],
+                                     "estimated_overhead_tokens": 28, "tool_schema_count": 2 },
+                      "system_prompt_tokens": 348,
                       "history_tokens": null, "tool_definitions_tokens": 402,
                       "other_input_tokens": 62, "latest_user_message_tokens": 41,
                       "message_count": 2, "tool_definition_count": 2,
@@ -361,6 +481,11 @@ Notes on the shape:
 * `estimation_confidence` is the human label (`exact token count`, `tokenizer
   estimate`, `heuristic estimate`), so the UI never has to map codes itself.
 * `null` always means *not present* or *not reported*, never `0`.
+* `text_token_count` (A) and `estimated_input_tokens` (B) are different numbers:
+  the `breakdown.rows` marked `tokenizer` add up to A, the rows marked `estimated`
+  add up to `breakdown.estimated_overhead_tokens`, and A plus that overhead is B.
+  `context.estimate_totals` adds a turn's requests up once each, leaving out a
+  request the budget refused.
 * `context_growth_tokens` is the difference between the first and the last estimate
   of the answer, which is how much the tool loop grew the request.
 
@@ -397,6 +522,13 @@ estimate:
   breakdown** table: one row per request with its estimate, actual input, actual
   output and budget use. The row for the request being inspected is highlighted,
   and missing values read `N/A` - never `0` and never an estimate.
+* a collapsible **Token Estimation Breakdown** for the selected request: one row
+  per component with its token count and how it was measured (`Tokenizer`,
+  `Estimated` or `Unknown`), followed by the totals for the measured text, the
+  estimated overhead, the request-level estimate, the provider's actual input and
+  the unaccounted difference. When the turn had several model requests, the
+  summary names the call the breakdown belongs to and the notes carry the
+  turn-wide sum, so two calls can never be read as one.
 
 **Context & Budget** - the arithmetic the backend documents, for the selected
 request:
@@ -411,6 +543,19 @@ request:
   backend's own explanation;
 * a configuration warning when the budget cannot work at all, and the budget
   caveat when the decision rests on an approximate count.
+
+**Copy Analysis** sits in the panel header, beside the close button. It copies one
+plain-text report for the whole selected turn: every value the two cards hold, all
+the model calls of the turn, the tool counts, the context-management numbers and
+the warnings, so the numbers can be pasted into ChatGPT or another model for
+analysis. The report is built from the same snapshot the panel renders, so it
+cannot disagree with what is on screen; a value that is not in that snapshot reads
+`N/A`, estimates are always labelled as estimates, and no message text, prompt or
+`.env` value is included. The button is disabled when the turn has no token or
+context data, and copying is refused with a short message while a request is in
+flight, so a stale snapshot never reaches the clipboard. `Copied!` replaces the
+label for a moment after a success, and a browser that blocks the clipboard is
+reported rather than failing silently.
 
 ### 9.2 How selection works
 
@@ -454,13 +599,17 @@ Backend functions live in `agent/tokenizer.py`, `agent/context_budget.py`,
 
 | Function | Responsibility |
 | --- | --- |
-| `heuristic_text_tokens()` | The documented fallback counter (`ceil(characters / 4)`). |
-| `read_tokenizer_backend()`, `read_tokenizer_name()`, `read_truthy_env()` | Read the tokenizer settings, with documented defaults. |
-| `model_base_name()` | Strip a provider routing suffix before asking tiktoken about a model. |
-| `try_tiktoken_tokenizer()`, `try_huggingface_tokenizer()` | Try one backend, and describe honestly what it is worth. |
+| `heuristic_text_tokens()`, `memoized_counter()` | The documented fallback counter (`ceil(characters / 4)`), and the per-text count cache that stops the same text being encoded twice. |
+| `read_tokenizer_backend()`, `read_tokenizer_name()`, `read_tokenizer_model_path()` | Read the tokenizer settings, with documented defaults. |
+| `model_base_name()`, `is_deepseek_v41_model()` | Strip a provider routing suffix, and recognise the model the verified tokenizer was checked against. |
+| `missing_tokenizer_files()`, `git_blob_oid()`, `verified_tokenizer_files()` | Check that the configured directory holds the official DeepSeek V4.1 tokenizer files. |
+| `load_huggingface_tokenizer()`, `huggingface_descriptor()` | Load one directory or id, and describe honestly what the result is worth. |
+| `try_tiktoken_tokenizer()`, `try_huggingface_tokenizer()` | Try one backend and return a descriptor, or a reason why nothing was loaded. |
 | `heuristic_descriptor()`, `load_tokenizer()` | Choose the tokenizer (with caching) and always return a usable descriptor. |
 | `build_tokenizer_metadata()`, `tokenizer_label()`, `estimation_status_label()` | Turn a descriptor into JSON-safe metadata and human labels. |
-| `message_text_for_estimate()`, `estimate_context()` | Turn one prepared request into a token estimate with a breakdown and tokenizer metadata. |
+| `message_component_texts()`, `message_text_for_estimate()` | Split one prepared message into the text parts that are counted, or join them into the single text form. |
+| `build_token_breakdown()`, `estimate_totals()` | Label every component with how it was measured, and add a turn's requests up once each. |
+| `estimate_context()` | Turn one prepared request into the estimates, the text token count and the breakdown, plus tokenizer metadata. |
 | `read_positive_int_env()`, `context_budget_settings()` | Read the budget from `.env`, with documented defaults. |
 | `context_budget_for_call()` | Compare an estimate with the budget and label its state. |
 | `enforce_context_budget()` | Reduce the history safely, or explain why the request cannot be sent. |
@@ -468,7 +617,9 @@ Backend functions live in `agent/tokenizer.py`, `agent/context_budget.py`,
 | `run_chat_with_tools()` | Run the check before every model call and collect the records. |
 | `buildContextPanel()`, `buildUsagePanel()` in `static/js/app.js` | Render the compact `Context & Budget` and `Token Usage` cards. |
 | `renderAnalytics()`, `analyticsCallTable()`, `analyticsTokenCard()`, `analyticsBudgetCard()`, `analyticsCallsSelector()` in `static/js/app.js` | Build the analytics dashboard for the selected turn. |
+| `analyticsBreakdownRows()`, `analyticsBreakdownTable()`, `analyticsBreakdownTotals()`, `analyticsBreakdownDetails()` in `static/js/app.js` | Render the per-request token estimation breakdown, its totals and its notes. |
 | `selectAnalyticsTurn()`, `syncSelectedTurn()`, `openAnalytics()`, `closeAnalytics()`, `onAnalyticsClick()` in `static/js/app.js` | Keep the panel and the selected turn in agreement, and drive the overlay on narrow screens. |
+| `analyticsSnapshot()`, `analyticsReportText()`, `analyticsCopyButton()`, `copyAnalyticsReport()` in `static/js/app.js` | Read the same snapshot the panel renders, turn it into the plain-text report, and copy it for sharing. |
 | `cleanEstimate()`, `cleanBudgetVerdict()`, `cleanContext()`, `cleanEnum()` in `static/js/store.js` | Keep the stored data - including every new tokenizer field - trustworthy when a conversation is reloaded. |
 | `.workspace`, `.analytics*`, `.topbar__analytics` in `static/app.css` | Lay out the three-part workspace and the overlay behaviour below 1080px. |
 

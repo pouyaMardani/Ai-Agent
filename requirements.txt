@@ -1,4 +1,14 @@
+# Core runtime: the FastAPI service, the OpenAI-compatible client and settings.
 fastapi==0.150.0
 openai==3.35.1
 pydantic==2.14.1
 uvicorn==0.54.0
+
+# DeepSeek V4.1 tokenizer support (agent/tokenizer.py). `transformers` reads the
+# official tokenizer.json, and `huggingface_hub` also ships the `hf` command used
+# once to download the tokenizer files. The app starts and answers without them,
+# but it can then only report the labelled approximate token count, so they are
+# part of a working installation. `transformers` already depends on `tokenizers`,
+# which is the lighter alternative loader if you prefer not to install it.
+huggingface_hub==2.4.0
+transformers==5.22.1
