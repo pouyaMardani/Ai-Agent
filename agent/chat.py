@@ -4,6 +4,7 @@ import json
 
 from openai import BadRequestError
 
+from agent.compaction import manage_context, stored_compaction
 from agent.context_budget import (
     ContextBudgetExceeded,
     context_budget_settings,
@@ -70,6 +71,10 @@ def keep_history(items, limit=HISTORY_LIMIT):
     This is input filtering, not a token budget: anything the browser sends that is
     not a {role, content} pair never reaches the model, and the context budget trims
     the saved conversation further when a request would be too large.
+
+    A message id, when the browser sends one, is kept as internal bookkeeping under
+    `_id`: it lets compaction record which stored message a summary covers, and
+    provider_messages() strips it again before anything is sent to the model.
     """
     kept = []
     for item in list(items or [])[-limit:]:
@@ -78,8 +83,29 @@ def keep_history(items, limit=HISTORY_LIMIT):
         role = str(item.get("role", "")).strip()
         content = str(item.get("content", "")).strip()
         if role in ("user", "assistant") and content:
-            kept.append({"role": role, "content": content})
+            message = {"role": role, "content": content}
+            message_id = str(item.get("id") or "").strip()
+            if message_id:
+                message["_id"] = message_id
+            kept.append(message)
     return kept
+
+
+def provider_messages(messages):
+    """Copy prepared messages without the internal keys this app adds to them.
+
+    The model must receive only the fields the API defines, so the bookkeeping the
+    estimator and the compactor use stays on this side of the request.
+    """
+    clean = []
+    for message in messages:
+        if isinstance(message, dict) and any(str(key).startswith("_") for key in message):
+            clean.append(
+                {key: value for key, value in message.items() if not str(key).startswith("_")}
+            )
+        else:
+            clean.append(message)
+    return clean
 
 
 def execute_tool_call(name, raw_arguments, root=None):
@@ -147,21 +173,32 @@ def run_chat_with_tools(
     context_out=None,
     history_count=0,
     budget=None,
+    compaction=None,
+    compaction_out=None,
 ):
     """Answer one user turn, running tool calls until the model stops asking.
 
     Up to MAX_TOOL_ROUNDS tool rounds are allowed; after that the tools are dropped
     so the model has to answer with what it already has.
 
-    Before every model call the exact messages and tool definitions for that call
-    are estimated and measured against the budget, so a request is trimmed or
-    refused rather than sent over budget.
+    Before every model call the request is offered to adaptive context management
+    (agent.compaction.manage_context): above the compaction trigger it folds older
+    saved messages into the stored summary and replaces the least important tool
+    results with managed representations, and below the trigger it does nothing at
+    all. After that the exact messages and tool definitions for that call are
+    estimated and measured against the budget, so a request is trimmed or refused
+    rather than sent over budget.
 
     `usage_out`, when given, receives one summary of the real token usage the model
     calls reported (see summarize_usage()). `context_out`, when given, receives one
-    summary of the pre-request context estimates and the active budget (see
-    summarize_context()). `history_count` tells the estimator which messages came
-    from the saved conversation, so its breakdown stays accurate.
+    summary of the pre-request context estimates, the active budget and what context
+    management did (see summarize_context()). `history_count` tells the estimator
+    which messages came from the saved conversation, so its breakdown stays accurate.
+
+    `compaction` is the stored compaction metadata that came with the conversation,
+    and `compaction_out`, when given, receives `{"compaction": metadata}` whenever
+    that metadata changed, which is what the browser needs to store. Management runs
+    once per model request and never edits the messages the caller passed in.
     """
     runner = tool_runner or execute_tool_call
     steps = []
@@ -173,8 +210,32 @@ def run_chat_with_tools(
     tool_executions = 0
     use_tools = True
     rounds = 0
+    stored = stored_compaction(compaction)
+    management = None
 
     while True:
+        # 0. Adaptive context management, before every model request. It estimates
+        #    the whole request itself and acts only above the trigger, so a turn that
+        #    fits pays for nothing. It changes what is sent, never the stored
+        #    conversation, and a failure leaves the request exactly as it was.
+        managed = manage_context(
+            client,
+            model,
+            messages,
+            history_count,
+            stored,
+            budget=budget,
+            tool_schemas=TOOLS if use_tools else None,
+            report=management,
+        )
+        messages = managed["messages"]
+        history_count = managed["history_count"]
+        management = managed["report"]
+        if managed["compaction"]:
+            stored = managed["compaction"]
+            if compaction_out is not None:
+                compaction_out.append({"compaction": stored})
+
         # 1. Build the exact request: the tool schemas count as input too.
         prepared = enforce_context_budget(
             messages,
@@ -188,7 +249,14 @@ def run_chat_with_tools(
             rejected = context_call_record(len(context_records) + 1, prepared)
             raise ContextBudgetExceeded(
                 prepared["reason"],
-                summarize_context(model, context_records + [rejected], budget, rejected=True),
+                summarize_context(
+                    model,
+                    context_records + [rejected],
+                    budget,
+                    rejected=True,
+                    compaction=(management or {}).get("history"),
+                    tool_results=(management or {}).get("tool_results"),
+                ),
             )
 
         messages = prepared["messages"]
@@ -200,7 +268,7 @@ def run_chat_with_tools(
             try:
                 response = client.chat.completions.create(
                     model=model,
-                    messages=messages,
+                    messages=provider_messages(messages),
                     tools=TOOLS,
                     tool_choice="auto",
                 )
@@ -228,7 +296,9 @@ def run_chat_with_tools(
                 )
                 continue
         else:
-            response = client.chat.completions.create(model=model, messages=messages)
+            response = client.chat.completions.create(
+                model=model, messages=provider_messages(messages)
+            )
 
         # A real model call just happened: keep the usage it reported, and compare
         # it with the estimate that was made before the call.
@@ -244,7 +314,13 @@ def run_chat_with_tools(
             if usage_out is not None:
                 usage_out.append(summarize_usage(call_usage, tool_executions))
             if context_out is not None:
-                summary = summarize_context(model, context_records, budget)
+                summary = summarize_context(
+                    model,
+                    context_records,
+                    budget,
+                    compaction=(management or {}).get("history"),
+                    tool_results=(management or {}).get("tool_results"),
+                )
                 if summary is not None:
                     context_out.append(summary)
             return reply or "(The model returned an empty response.)", steps

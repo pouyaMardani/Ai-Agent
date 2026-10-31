@@ -4,6 +4,7 @@ import { hydrateIcons, iconMarkup } from "./icons.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import {
   LIMITS,
+  cleanCompaction,
   cleanContext,
   cleanUsage,
   deriveTitle,
@@ -1503,6 +1504,31 @@ function analyticsUsageState(usage) {
   return { text: "Partly reported", tone: "warn" };
 }
 
+// What summary-based compaction did before this turn's first model call. The text
+// stays short; the reason, when there is one, becomes the row's tooltip.
+function analyticsCompactionState(compaction) {
+  const folded = Number.isFinite(compaction.compacted_messages) ? compaction.compacted_messages : 0;
+  if (compaction.applied) {
+    return {
+      text: "Summarised " + folded + (folded === 1 ? " older message" : " older messages"),
+      tone: "ok",
+      hint: "Those messages were replaced by the stored summary in this request; the conversation itself still keeps them.",
+    };
+  }
+  if (compaction.reused) {
+    return {
+      text: "Stored summary reused",
+      tone: "muted",
+      hint: "The stored summary already covered those older messages, so nothing had to be summarised again.",
+    };
+  }
+  return {
+    text: "Not applied",
+    tone: "warn",
+    hint: compaction.reason || "Compaction ran but did not change the request.",
+  };
+}
+
 function analyticsBudgetState(budget) {
   const value = budget ? budget.budget_status : null;
   if (value === "within") return { text: "Within budget", tone: "ok" };
@@ -1852,6 +1878,206 @@ function analyticsBreakdownDetails(estimate, actual, discrepancy, context, callL
   return details;
 }
 
+// --- Tool result management -------------------------------------------------
+//
+// Tool output is managed separately from conversation history, so it gets its own
+// section: what the server classified, what it replaced and what that saved. Every
+// number here is the server's own tokenizer estimate, and it is never mixed with
+// provider-reported usage.
+
+const TOOL_RESULT_CLASSES = [
+  ["small", "Small", "Always kept", "Already cheap: keeping it costs less than managing it."],
+  ["normal", "Normal", "Kept unless needed", "Moderate size; reduced only when the request needs the room."],
+  ["large", "Large", "Summarised when needed", "At or above the configured share of the input budget."],
+  [
+    "critical",
+    "Critical",
+    "Trimmed, never paraphrased",
+    "Reports a failure or an error; its reported fields and error text are kept verbatim.",
+  ],
+];
+
+function toolResultsSummaryText(toolResults) {
+  const results = Number.isFinite(toolResults.results) ? toolResults.results : null;
+  const managed = Number.isFinite(toolResults.managed_results) ? toolResults.managed_results : null;
+  if (results === null || managed === null) return null;
+  if (managed === 0) return "nothing replaced (" + results + " kept as returned)";
+  const saved = Number.isFinite(toolResults.saved_tokens)
+    ? formatTokens(toolResults.saved_tokens)
+    : USAGE_UNAVAILABLE;
+  return managed + " of " + results + " replaced, about " + saved + " tokens saved";
+}
+
+function countPairText(first, second) {
+  const left = Number.isFinite(first) ? formatTokens(first) : USAGE_UNAVAILABLE;
+  const right = Number.isFinite(second) ? formatTokens(second) : USAGE_UNAVAILABLE;
+  return left + " / " + right;
+}
+
+function toolResultClassTable(toolResults) {
+  const table = document.createElement("table");
+  table.className = "analytics-table analytics-table--breakdown";
+
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["Classification", "Results", "Treatment"].forEach((label) => {
+    const cell = document.createElement("th");
+    cell.setAttribute("scope", "col");
+    cell.textContent = label;
+    headRow.appendChild(cell);
+  });
+  head.appendChild(headRow);
+
+  const body = document.createElement("tbody");
+  TOOL_RESULT_CLASSES.forEach(([key, label, treatment, meaning]) => {
+    const line = document.createElement("tr");
+
+    const name = document.createElement("th");
+    name.setAttribute("scope", "row");
+    name.textContent = label;
+    name.title = meaning;
+    line.appendChild(name);
+
+    const count = document.createElement("td");
+    const value = toolResults.classified[key];
+    if (Number.isFinite(value)) {
+      count.textContent = formatTokens(value);
+      count.classList.add("is-num");
+      count.classList.add("is-strong");
+    } else {
+      count.textContent = USAGE_UNAVAILABLE;
+      count.classList.add("is-empty");
+    }
+    line.appendChild(count);
+
+    const note = document.createElement("td");
+    note.className = "analytics-table__measure";
+    note.textContent = treatment;
+    note.title = meaning;
+    line.appendChild(note);
+
+    body.appendChild(line);
+  });
+
+  table.append(head, body);
+  return table;
+}
+
+function toolResultsTotalsTable(toolResults) {
+  const table = document.createElement("table");
+  table.className = "analytics-table analytics-table--totals";
+  const body = document.createElement("tbody");
+
+  analyticsRow(body, "Tool results in the request", toolResults.results, {
+    hint: "How many tool results the request carried when it was measured last.",
+  });
+  analyticsRow(body, "Replaced by a managed representation", toolResults.managed_results, {
+    hint: "Results whose content is now a marked representation. The tool message and its tool_call_id are unchanged.",
+  });
+  analyticsRow(body, "Kept exactly as returned", toolResults.unchanged, {
+    hint: "Small, recent or unmatched results, and any result that did not need reducing.",
+  });
+  analyticsRow(body, "Original size (estimate)", toolResults.original_tokens, { strong: true });
+  analyticsRow(body, "Managed size (estimate)", toolResults.managed_tokens, { strong: true });
+  analyticsRow(body, "Estimated tokens saved", toolResults.saved_tokens, { strong: true });
+  analyticsRow(body, "Summaries written", toolResults.summarized, {
+    hint: "Management requests of their own, with no tools. They are never counted as agent model calls.",
+  });
+  analyticsRow(body, "Trimmed deterministically", toolResults.trimmed, {
+    hint: "Critical results are reduced by keeping their reported fields and error text, never by a paraphrase.",
+  });
+  analyticsRow(body, "Raw-result retrievals", toolResults.retrievals, {
+    hint: "Reads of retained raw results during this turn, including the read-back that proves an original is recoverable before a result is replaced.",
+  });
+  analyticsRow(
+    body,
+    "Management requests (calls / failures)",
+    countPairText(toolResults.management_requests.calls, toolResults.management_requests.failures),
+    { hint: "Condensing requests of its own, kept apart from the agent's model calls." }
+  );
+  analyticsRow(
+    body,
+    "Adaptive passes (changed / passes)",
+    countPairText(toolResults.adaptive.changed, toolResults.adaptive.passes),
+    { hint: "How often context was managed between tool rounds, and how many passes ran in total." }
+  );
+  analyticsRow(
+    body,
+    "Retained raw results (entries / bytes)",
+    countPairText(toolResults.store.entries, toolResults.store.bytes),
+    { hint: "The in-memory store of original tool output; oldest entries are evicted first when it reaches its limit." }
+  );
+
+  table.appendChild(body);
+  return table;
+}
+
+function priorityDecisionList(toolResults) {
+  const wrap = document.createElement("div");
+
+  const intro = document.createElement("p");
+  intro.className = "analytics-note";
+  intro.textContent =
+    (toolResults.priority.enabled
+      ? "Priority order, least important first ("
+      : "Reduction order without priority scoring (") +
+    formatTokens(toolResults.priority.reducible) +
+    " reducible item(s)):";
+  wrap.appendChild(intro);
+
+  toolResults.priority.decisions.forEach((decision) => {
+    const line = document.createElement("p");
+    line.className = "analytics-note";
+    line.textContent =
+      "#" +
+      formatTokens(decision.index) +
+      " \u00B7 " +
+      decision.kind +
+      " \u00B7 score " +
+      formatTokens(decision.score) +
+      " \u00B7 " +
+      (decision.reason || "no reason recorded");
+    wrap.appendChild(line);
+  });
+
+  return wrap;
+}
+
+function analyticsToolResultsDetails(toolResults) {
+  if (!toolResults || toolResults.available !== true) return null;
+
+  const details = document.createElement("details");
+  details.className = "analytics-details";
+
+  const summary = document.createElement("summary");
+  summary.textContent = "Tool Result Management";
+  details.appendChild(summary);
+  details.appendChild(toolResultClassTable(toolResults));
+  details.appendChild(toolResultsTotalsTable(toolResults));
+
+  if (toolResults.priority.decisions.length > 0) {
+    details.appendChild(priorityDecisionList(toolResults));
+  }
+
+  toolResults.notes.forEach((text) => {
+    const note = document.createElement("p");
+    note.className = "analytics-note";
+    note.textContent = text;
+    details.appendChild(note);
+  });
+
+  const skipped = Object.entries(toolResults.skipped_reasons || {});
+  if (skipped.length > 0) {
+    const line = document.createElement("p");
+    line.className = "analytics-note";
+    line.textContent =
+      "Left alone: " + skipped.map(([reason, count]) => count + " \u00D7 " + reason).join("; ") + ".";
+    details.appendChild(line);
+  }
+
+  return details;
+}
+
 // Card 1: what the provider reported. Every row here either came back from the
 // provider or is explicitly labelled an estimate.
 function analyticsTokenCard(conversation, message, context, usage, calls, call, selectedIndex) {
@@ -1884,6 +2110,30 @@ function analyticsTokenCard(conversation, message, context, usage, calls, call, 
     node: analyticsPill(estimation.text, estimation.tone),
     hint: "An estimate is never the model's own count, even when a real tokenizer produced it.",
   });
+
+  // Compaction only appears when it actually ran for this turn.
+  const compaction = context && context.compaction ? context.compaction : null;
+  if (compaction) {
+    const state = analyticsCompactionState(compaction);
+    analyticsRow(rows, "Context compaction", null, {
+      node: analyticsPill(state.text, state.tone),
+      hint: state.hint,
+    });
+    if (Number.isFinite(compaction.estimate_after)) {
+      analyticsRow(rows, "Input after compaction", compaction.estimate_after, {
+        hint: "Measured again once the summary had replaced the oldest saved messages.",
+      });
+    }
+  }
+
+  // Tool-result management is a separate story from conversation compaction, so it
+  // gets its own row and its own section.
+  const toolResults = context && context.tool_results ? context.tool_results : null;
+  if (toolResults) {
+    analyticsRow(rows, "Tool result management", toolResultsSummaryText(toolResults), {
+      hint: "Tool output is managed on its own: a large result becomes a marked managed representation, and the raw result stays retrievable on the server.",
+    });
+  }
 
   analyticsRow(rows, "Estimated input", estimate ? estimate.estimated_input_tokens : null, {
     hint: "Counted by this app before the request was sent. This is not provider usage.",
@@ -1966,6 +2216,9 @@ function analyticsTokenCard(conversation, message, context, usage, calls, call, 
     callLabel
   );
   if (breakdown) card.card.appendChild(breakdown);
+
+  const toolDetails = analyticsToolResultsDetails(toolResults);
+  if (toolDetails) card.card.appendChild(toolDetails);
 
   return card.card;
 }
@@ -2213,6 +2466,24 @@ function reportSection(title, lines) {
   return [title, "-".repeat(title.length), ...lines, ""];
 }
 
+// How much summary a conversation carries, without printing the summary text into
+// the report: the report describes the analytics, not the conversation.
+function storedSummaryLabel(conversation) {
+  const stored = conversation && conversation.compaction ? conversation.compaction : null;
+  if (!stored) return "none";
+  const characters = typeof stored.summary === "string" ? stored.summary.length : 0;
+  const version = Number.isFinite(stored.summary_version) ? stored.summary_version : 1;
+  const updates = Number.isFinite(stored.compaction_count) ? stored.compaction_count : 0;
+  return (
+    characters.toLocaleString() +
+    " characters, version " +
+    version +
+    ", folded " +
+    updates +
+    (updates === 1 ? " time" : " times")
+  );
+}
+
 // The same wording as the card row above, so the report and the panel cannot
 // disagree about the same number.
 function analyticsDiscrepancyText(discrepancy) {
@@ -2298,6 +2569,7 @@ function analyticsReportText(snapshot) {
         "Stored messages in this conversation",
         conversation ? conversation.messages.length : null
       ),
+      reportField("Stored summary", storedSummaryLabel(conversation)),
       reportField("Newest messages replayed as history", LIMITS.historySentToApi),
     ])
   );
@@ -2512,6 +2784,20 @@ function analyticsReportText(snapshot) {
     ])
   );
 
+  // What compaction did before this turn's first call, when it ran at all.
+  const compactionLines = [];
+  if (context && context.compaction) {
+    const compaction = context.compaction;
+    compactionLines.push(
+      reportField("Context compaction", analyticsCompactionState(compaction).text),
+      reportField("Messages folded into the summary", compaction.compacted_messages),
+      reportField("Estimated input before compaction", compaction.estimate_before),
+      reportField("Estimated input after compaction", compaction.estimate_after),
+      reportField("Compaction target met", compaction.met_target ? "yes" : "no"),
+      reportField("Compaction note", compaction.reason)
+    );
+  }
+
   lines.push(
     ...reportSection("CONTEXT MANAGEMENT", [
       reportField(
@@ -2531,8 +2817,65 @@ function analyticsReportText(snapshot) {
       reportField("Requests rejected before sending", calls.length > 0 ? rejectedCalls : null),
       reportField("Newest messages replayed as history", LIMITS.historySentToApi),
       "Messages omitted by the history limit: N/A (the snapshot records the limit, not how many older messages were left out)",
+      ...compactionLines,
     ])
   );
+
+  // Tool-result management is its own story, so it gets its own section: what was
+  // classified, what was replaced, and what that saved. All of these are this app's
+  // estimates; the provider-reported counts stay in TOKEN USAGE.
+  const toolResultLines = [];
+  const toolResults = context ? context.tool_results : null;
+  if (toolResults && toolResults.available === true) {
+    const classes = [toolResults.classified.small, toolResults.classified.normal, toolResults.classified.large, toolResults.classified.critical];
+    toolResultLines.push(
+      reportField("Tool results in the request", toolResults.results),
+      reportField(
+        "Classification (small / normal / large / critical)",
+        classes.map((value) => (Number.isFinite(value) ? formatTokens(value) : USAGE_UNAVAILABLE)).join(" / ")
+      ),
+      reportField("Replaced by a managed representation", toolResults.managed_results),
+      reportField("Kept exactly as returned", toolResults.unchanged),
+      reportField("Original size (estimate)", toolResults.original_tokens),
+      reportField("Managed size (estimate)", toolResults.managed_tokens),
+      reportField("Estimated tokens saved", toolResults.saved_tokens),
+      reportField("Summaries written", toolResults.summarized),
+      reportField("Trimmed deterministically", toolResults.trimmed),
+      reportField("Raw-result retrievals", toolResults.retrievals),
+      reportField(
+        "Management requests",
+        countPairText(toolResults.management_requests.calls, toolResults.management_requests.failures) +
+          " (calls / failures)"
+      ),
+      reportField(
+        "Adaptive passes",
+        countPairText(toolResults.adaptive.changed, toolResults.adaptive.passes) + " (changed / passes)"
+      ),
+      reportField(
+        "Retained raw results",
+        countPairText(toolResults.store.entries, toolResults.store.bytes) + " (entries / bytes)"
+      ),
+      "Note: these are this app's tokenizer estimates and are never mixed with the provider-reported counts above.",
+      "Note: a management request is a condensing call of this app's own; it is not an agent model call and never appears in Token Usage."
+    );
+    toolResults.priority.decisions.forEach((decision) => {
+      toolResultLines.push(
+        "Priority #" +
+          decision.index +
+          " (" +
+          decision.kind +
+          ", score " +
+          decision.score +
+          "): " +
+          (decision.reason || "no reason recorded")
+      );
+    });
+    Object.entries(toolResults.skipped_reasons || {}).forEach(([reason, count]) => {
+      toolResultLines.push("Left alone " + count + " time(s): " + reason);
+    });
+    toolResults.notes.forEach((note) => toolResultLines.push("Note: " + note));
+    lines.push(...reportSection("TOOL RESULT MANAGEMENT", toolResultLines));
+  }
 
   const warnings = [];
   if (message.error === true) {
@@ -2577,6 +2920,19 @@ function analyticsReportText(snapshot) {
   }
   if (budget && budget.budget_caveat) {
     warnings.push("Context budget caveat: " + budget.budget_caveat);
+  }
+  if (context && context.compaction && !context.compaction.applied && !context.compaction.reused) {
+    warnings.push(
+      "Context compaction did not change the request: " +
+        (context.compaction.reason || "no reason was reported") +
+        "."
+    );
+  }
+  if (toolResults && Number.isFinite(toolResults.management_requests.failures) && toolResults.management_requests.failures > 0) {
+    warnings.push(
+      toolResults.management_requests.failures +
+        " tool-result management request(s) failed, so those results were kept in full."
+    );
   }
   lines.push(
     ...reportSection("WARNINGS", warnings.length > 0 ? warnings.map((item) => "- " + item) : ["None."])
@@ -2901,7 +3257,9 @@ function historyPayload(conversation, userIndex) {
     .slice(0, userIndex)
     .slice(-LIMITS.historySentToApi)
     .filter((item) => (item.role === "user" || item.role === "assistant") && item.content.trim())
-    .map((item) => ({ role: item.role, content: item.content }));
+    // The id travels with the message so the server can record which stored
+    // message a compaction summary covers. It is never sent to the model.
+    .map((item) => ({ role: item.role, content: item.content, id: item.id }));
 }
 
 async function requestReply(conversationId, userIndex) {
@@ -2918,6 +3276,7 @@ async function requestReply(conversationId, userIndex) {
   let reply = null;
   let failure = null;
   let failureContext = null;
+  let failureCompaction = null;
   let data = null;
 
   try {
@@ -2927,6 +3286,9 @@ async function requestReply(conversationId, userIndex) {
       body: JSON.stringify({
         message: userMessage.content,
         history: historyPayload(conversation, userIndex),
+        // The summary of the older part of this conversation, if it has one. The
+        // server sanitises it and ignores anything that is not that shape.
+        compaction: conversation.compaction || null,
       }),
     });
 
@@ -2940,8 +3302,10 @@ async function requestReply(conversationId, userIndex) {
       const error = new Error(
         (data && data.detail) || "The server could not answer. Please try again."
       );
-      // A refused request also sends the context numbers that explain it.
+      // A refused request also sends the context numbers that explain it, and the
+      // summary compaction managed to produce before the request was judged.
       if (data && data.context) error.context = data.context;
+      if (data && data.compaction) error.compaction = data.compaction;
       throw error;
     }
     reply =
@@ -2951,6 +3315,7 @@ async function requestReply(conversationId, userIndex) {
   } catch (error) {
     failure = error && error.message ? error.message : "Something went wrong. Please try again.";
     failureContext = cleanContext(error && error.context);
+    failureCompaction = cleanCompaction(error && error.compaction);
   }
 
 const target = state.conversations.find((item) => item.id === conversationId);
@@ -2965,6 +3330,9 @@ const target = state.conversations.find((item) => item.id === conversationId);
         at: Date.now(),
       };
       if (failureContext) refused.context = failureContext;
+      // A refused turn can still have produced a summary, so it is kept: the next
+      // message then does not have to summarise the same history again.
+      if (failureCompaction) target.compaction = failureCompaction;
       target.messages.push(refused);
       // A refused request is still a turn worth explaining, so the panel moves
       // to it: its numbers are the reason the request was refused.
@@ -2982,6 +3350,10 @@ const target = state.conversations.find((item) => item.id === conversationId);
       if (usage) answer.usage = usage;
       const context = cleanContext(data && data.context);
       if (context) answer.context = context;
+      // The summary describes the conversation, not this answer, so it is stored
+      // beside the messages.
+      const compaction = cleanCompaction(data && data.compaction);
+      if (compaction) target.compaction = compaction;
       target.messages.push(answer);
       // The newest answer becomes the turn the analytics panel describes, so a
       // fresh reply is never hidden behind an older selection.
@@ -3117,6 +3489,8 @@ async function clearConversation() {
   if (!ok) return;
 
   conversation.messages = [];
+  // The summary described those messages, so it goes with them.
+  conversation.compaction = null;
   conversation.updatedAt = Date.now();
   persist();
   renderAll({ scroll: "bottom" });

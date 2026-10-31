@@ -245,6 +245,124 @@ A turn with several model requests keeps one breakdown per request, and
 `context.estimate_totals` adds those requests up once each - a request the budget
 refused is not a model call and is left out - so no breakdown is counted twice.
 
+### 3.4 Adaptive context management (compaction and tool results)
+
+When the estimate above grows past a share of the input budget, context management
+reduces what is sent - it never touches the stored conversation. It runs before
+**every** model request, including between tool rounds, and it has two jobs in a
+fixed order: fold older *conversation* messages into the summary, then manage the
+*tool results* that dominate the rest of the request.
+
+```text
+COMPACTION_TRIGGER_RATIO           0.70   share of the input budget that starts a pass
+COMPACTION_TARGET_RATIO            0.50   share the reduced request should come back to
+TOOL_RESULT_SUMMARY_THRESHOLD_RATIO 0.15  share at which a single result counts as large
+```
+
+| Step | What happens |
+| --- | --- |
+| 1 | The prepared request (messages *and* the tool schemas of that call) is estimated with the same estimator the budget uses. Below the trigger the pass ends here: no summary request, no tool-result summary, no change. |
+| 2 | Older saved conversation messages are folded into the summary first ([3.4.1](#341-conversation-compaction)). The saved-history block is grouped so an assistant tool-call message plus the tool results answering it stay one group, the system prompt and the newest user message are never eligible, and a group is always folded whole. |
+| 3 | Folding stops when the projected request fits the target, or when one more group would leave fewer than 512 tokens of verbatim recent history. |
+| 4 | If the request is still above the target, tool results are reduced next ([3.5](#35-tool-result-management)) - least important first, so the newest round, relevant results and critical failures are reduced last. |
+| 5 | The request context is rebuilt from the system prompt plus the summary, the newest saved messages verbatim, this turn, and the managed tool results. It is estimated again, and the existing enforcement decides whether it may be sent. |
+| 6 | If it still cannot fit, nothing is claimed and nothing is invented: `enforce_context_budget()` trims the oldest remaining history or refuses with the usual `413`. |
+
+#### 3.4.1 Conversation compaction
+
+* **What is eligible**: only the saved-history block. Tool results are never folded
+  into the conversation summary - they are managed separately, which is what keeps a
+  tool call and its result a valid pair.
+* **How**: one dedicated model request with **no tools**, receiving the previous
+  summary plus the turns being folded in, and returning a structured summary (facts,
+  decisions, user requirements, current task, technical details, unresolved
+  questions) that separates confirmed facts from uncertainty. The reply is validated
+  - non-empty, sized, not a verbatim repeat of the previous summary - before it
+  replaces anything.
+* **Never twice for the same content**: the stored summary records the newest message
+  it covers, so a later pass only folds what came after it. When the request can
+  already be reduced with the existing summary, that summary is reused without a
+  model call; when the boundary message has left the browser's history window, the
+  folded range is summarised again with an explicit "some of this may already be
+  described" instruction.
+* **Where it is stored**: `compaction` travels with the conversation, exactly like
+  the messages do: the browser stores it, sends it back with the next request, and
+  the server sanitises it again on arrival.
+
+The turn reports, and the panel shows, every pass: how many ran, how many changed
+something, how many found nothing left to reduce, the estimate before and after, and
+- for tool results - what was classified, replaced and saved. A pass that cannot get
+the request under the budget does not claim success: the normal trimming and refusal
+behaviour still applies, which is what stops a failed reduction from silently
+bypassing the budget.
+
+### 3.5 Tool-result management
+
+Tool output is where a tool-calling request usually gets into trouble: one turn can
+accumulate several thousand tokens of results across three rounds. Tool results are
+therefore managed on their own, with their own classification, their own summary
+request and their own retention - and never by deleting or reordering a tool message,
+because its `tool_call_id` has to keep matching the assistant message that asked for
+it.
+
+| Class | Rule (deterministic) | Treatment |
+| --- | --- | --- |
+| `critical` | The result reports a failure (`ok: false` or an `error`) | Reduced only by deterministic trimming: reported fields and error text verbatim, plus the first 600 and last 200 characters of the body, with the sizes stated. A failure's exact words are never paraphrased. |
+| `small` | At or below 200 tokens | Kept exactly as the tool returned it. |
+| `large` | At or above `TOOL_RESULT_SUMMARY_THRESHOLD_RATIO` (0.15) of the input budget | Summarised by a dedicated no-tools request when the request needs the room. |
+| `normal` | Everything else | Kept unless the request needs the room; then summarised like a large result. |
+
+What a replacement looks like: the tool message keeps its `role` and its
+`tool_call_id`, and its content becomes a marked managed representation -
+`[managed tool result]`, the tool name, the tool's status, the original token count,
+the id of the retained raw result, the mode (`summarized` or `trimmed`), the
+condensed text, and a closing line saying that this is data, never instructions. The
+model can therefore tell a condensed result from a complete one.
+
+Retention and retrieval:
+
+* Raw content is kept in a bounded in-memory store keyed by `tool_call_id`
+  (`TOOL_RESULT_STORE_MAX_BYTES`, default 5 MiB), oldest entries evicted first. A
+  turn's own results are its newest entries, so eviction can only reach older turns,
+  and an entry larger than the whole budget is refused rather than stored.
+* Before anything is replaced, the retained copy is read back: a result whose raw
+  content cannot be recovered is left in full. That read-back is counted in the
+  analytics as a retrieval, together with any other internal read of a retained
+  result.
+* Retrieval is internal (`tool_result_manager.retrieve_raw`). This phase adds no
+  endpoint and no user-facing tool; it makes the original recoverable for the turn
+  and for the code paths that need it.
+* The store is process memory, so it starts empty after a restart. That is safe here:
+  this app keeps no server-side conversation, and tool results only ever exist inside
+  a turn.
+
+Order of reduction: least important first, using the priority model documented in
+`docs/ARCHITECTURE.md` (Priority scoring). Older and unrelated results go before
+recent ones, a result that shares a term with the current request is kept longer, a
+large result is preferred over a small one, and a critical failure is reduced last. A
+result that is already a managed representation is never summarised again.
+
+Honest limits:
+
+* The provider's own serialization is still invisible, so a managed request keeps the
+  same estimate-versus-actual difference as any other request.
+* Only the history the browser sent (the newest 40 messages) can be folded, so a
+  conversation whose stored history sits mostly outside that window compacts less
+  than it could.
+* The conversation summary is model-written text carried by the client. The server
+  bounds its type and length, but its content is only ever as good as the summary
+  request.
+* A tool summary is model-written too, and it is written once: a later pass does not
+  re-summarise a managed result.
+* The store is bounded, so a managed representation can outlive its raw copy. The
+  representation still states the original size, but that original is then no longer
+  retrievable.
+* Tool results are only ever managed inside a turn, because the browser never sends
+  tool messages back to the server.
+* Summaries and management requests cost tokens of their own. They are reported
+  separately (`compaction` and `tool_results` in the context payload) and are never
+  counted as agent model calls in the provider usage.
+
 ## 4. How the safety margin works
 
 `max_output_tokens` is reserved because a request is judged *before* the answer
@@ -274,6 +392,11 @@ max_input_budget_tokens       = 6656
 1. Build the exact request for that call (messages *and* tool schemas).
 2. Estimate its input size with `estimate_context()`.
 3. Compare it with the budget using `context_budget_for_call()`.
+
+Before the first of those calls, the request is also offered to compaction
+([3.4](#34-summary-based-compaction)), which may rebuild it around the stored
+summary. Compaction runs once per turn, so the calls below always describe the same
+request context they were sent with.
 
 A tool loop therefore produces several estimates for one assistant answer:
 
@@ -404,10 +527,87 @@ can confirm what was actually in force for a response. Changing `.env` requires
 restarting the app (or reloading with `uvicorn --reload`); the budget is read once
 per assistant turn, so every call inside one answer is judged by the same numbers.
 
+### 7.3 Compaction settings
+
+Compaction is part of the budget: it is expressed as shares of the input budget the
+settings above produce, and it never replaces enforcement.
+
+```dotenv
+# Fold older saved messages into a summary when the request reaches this share
+# of the input budget, and aim to come back down to this one.
+COMPACTION_ENABLED=true
+COMPACTION_TRIGGER_RATIO=0.70
+COMPACTION_TARGET_RATIO=0.50
+```
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `COMPACTION_ENABLED` | `true` | `true`, `1`, `yes`, `on` and `false`, `0`, `no`, `off` are recognised. `false` keeps the previous behaviour exactly: no summary request is ever made. |
+| `COMPACTION_TRIGGER_RATIO` | `0.70` | A share of the **input budget**, not of the context window. Anything that is not between 0 and 1 keeps the default; an input budget of zero disables compaction, because there is nothing to measure against. |
+| `COMPACTION_TARGET_RATIO` | `0.50` | The goal for the compacted request. If it is not below the trigger, both ratios fall back to their defaults, so a typo cannot make every request compact. |
+
+The summary itself is not configured here: it belongs to each conversation, stored
+by the browser beside its messages, sent back with the request and sanitised by the
+server. Editing it outside the app is not supported, and clearing a conversation
+clears its summary with it.
+
+### 7.4 Context management settings
+
+Adaptive management and tool-result management are part of the budget too: their
+thresholds are shares of the same input budget, and they never replace enforcement.
+
+```dotenv
+# Manage context before every model request, not only the first one.
+ADAPTIVE_COMPACTION_ENABLED=true
+CONTEXT_PRIORITY_ENABLED=true
+
+# Manage tool results on their own: classify them, and summarise the ones that
+# outgrow this share of the input budget.
+TOOL_RESULT_MANAGEMENT_ENABLED=true
+TOOL_RESULT_SUMMARY_THRESHOLD_RATIO=0.15
+
+# Bounded in-memory store for the original tool output (5 MiB).
+TOOL_RESULT_STORE_MAX_BYTES=5242880
+```
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `ADAPTIVE_COMPACTION_ENABLED` | `true` | When `false`, context is managed only before the first model call of a turn, exactly as in the previous phase. |
+| `CONTEXT_PRIORITY_ENABLED` | `true` | When `false`, the reduction order still follows the documented base weights and age decay, and the analytics say scoring was disabled. |
+| `TOOL_RESULT_MANAGEMENT_ENABLED` | `true` | `false` keeps every tool result exactly as the tool returned it. An input budget of zero also switches management off, because there is nothing to measure against. |
+| `TOOL_RESULT_SUMMARY_THRESHOLD_RATIO` | `0.15` | The share of the input budget at or above which a single result counts as *large*. Must be between 0 and 1; anything else keeps the default. With the defaults (input budget 6,656) that is 998 tokens. |
+| `TOOL_RESULT_STORE_MAX_BYTES` | `5242880` | Size of the in-memory store of raw tool results. A single result larger than this is never retained, and is therefore never replaced. |
+
 ## 8. Data shape (short reference)
 
 `POST /api/chat` keeps its old fields (`reply`, `model`, `steps`, `usage`) and adds
-an optional `context`:
+an optional `context`, plus an optional `compaction` that is present only when the
+conversation's stored summary changed during that turn:
+
+```jsonc
+{
+  "reply": "...",
+  "model": "...",
+  "compaction": { "summary": "Project / Conversation Context\n...",
+                  "summary_version": 1, "last_compacted_message_id": "m_ab12...",
+                  "compaction_count": 2, "last_compacted_at": 1761234567890 }
+}
+```
+
+The request body may carry the same `compaction` object back, next to the message
+and the history (each history entry may name its message id). Anything that is not
+that shape is ignored, so a conversation saved before compaction existed keeps
+working:
+
+```jsonc
+{
+  "message": "...",
+  "history": [ { "role": "user", "content": "...", "id": "m_ab12..." } ],
+  "compaction": null
+}
+```
+
+Inside `context`, the turn also reports what compaction did before its first call:
 
 ```jsonc
 {
@@ -435,6 +635,26 @@ an optional `context`:
     "estimation_confidence": "heuristic estimate",
     "model_calls": 2,
     "reduced_calls": 0,
+    "compaction": { "attempted": true, "applied": true, "reused": false, "reason": null,
+                    "compacted_messages": 24, "estimate_before": 6100,
+                    "estimate_after": 3120, "met_target": true,
+                    "trigger_tokens": 4659, "target_tokens": 3328, "attempts": 2 },
+    "tool_results": {
+      "available": true, "results": 9,
+      "classified": { "small": 2, "normal": 5, "large": 1, "critical": 1 },
+      "managed_results": 3, "managed_this_turn": 3, "summarized": 2, "trimmed": 1,
+      "unchanged": 6, "original_tokens": 7414, "managed_tokens": 1204,
+      "saved_tokens": 6210, "retrievals": 3,
+      "priority": { "enabled": true, "reducible": 4,
+                    "decisions": [ { "index": 6, "kind": "tool_older", "score": 42,
+                                     "tokens": 812, "reason": "tool_older base (+150); large tool result (-100); 4 message(s) from the newest (-8)" } ] },
+      "adaptive": { "passes": 2, "changed": 1, "blocked": 1 },
+      "management_requests": { "calls": 2, "failures": 0 },
+      "store": { "entries": 4, "bytes": 51234, "max_bytes": 5242880,
+                 "evictions": 0, "refused": 0, "retrievals": 3 },
+      "skipped_reasons": { "small enough to keep as it is": 2 },
+      "notes": [ "1 result(s) report a failure: they are kept, and reduced only by deterministic trimming when the request needs it" ]
+    },
     "rejected": false,
     "context_growth_tokens": 412,
     "calls": [
@@ -488,10 +708,24 @@ Notes on the shape:
   request the budget refused.
 * `context_growth_tokens` is the difference between the first and the last estimate
   of the answer, which is how much the tool loop grew the request.
+* `context.compaction` is the report of the compaction attempt for that turn, and
+  the top-level `compaction` is the *metadata to store*: the summary itself, the
+  message it covers, its version, how many times it has been updated and when. The
+  report never carries conversation text, so storing it with the analytics does not
+  duplicate the summary. A turn where compaction never ran has `compaction: null`.
+* `context.tool_results` is the tool-result management report: how many results the
+  request carried, their classes, what was replaced, the original and managed sizes,
+  the estimate saved, the raw-result retrievals, the adaptive pass counts, the
+  management request counts and the priority decisions with their reasons. Every
+  number in it is this app's tokenizer estimate, and it never mixes with `usage`,
+  which stays provider-reported only. A management request (a conversation summary
+  or a tool-result summary) is counted there and never appears in `usage.model_calls`.
 
 A refused turn answers `413` with `{"detail": "...", "rejected": true, "model":
-"...", "context": { ... "rejected": true ... }}` and no `usage`, because no model
-call happened.
+"...", "context": { ... "rejected": true ... }, "compaction": { ... }}` and no
+`usage`, because no model call happened. The `compaction` entry is there only when
+a summary was generated before the request was refused, so the browser can keep it
+instead of building the same summary again on the next message.
 
 ## 9. The analytics panel
 
@@ -529,6 +763,17 @@ estimate:
   the unaccounted difference. When the turn had several model requests, the
   summary names the call the breakdown belongs to and the notes carry the
   turn-wide sum, so two calls can never be read as one.
+* a **Context compaction** row when compaction ran for that turn, saying whether the
+  older messages were summarised, whether the stored summary was reused, or why
+  nothing was compacted (the reason is the row's tooltip), plus an **Input after
+  compaction** row with the re-measured estimate.
+* a **Tool result management** row - how many tool results were replaced and roughly
+  how many tokens that saved - and, underneath it, a collapsible **Tool Result
+  Management** section: the classification table (small, normal, large, critical),
+  the totals for original and managed size, the estimated tokens saved, the summaries
+  written, the deterministic trims, the raw-result retrievals, the adaptive pass
+  counts, the retained store (entries and bytes) and the priority order with the
+  reasons behind each score.
 
 **Context & Budget** - the arithmetic the backend documents, for the selected
 request:
@@ -614,12 +859,22 @@ Backend functions live in `agent/tokenizer.py`, `agent/context_budget.py`,
 | `context_budget_for_call()` | Compare an estimate with the budget and label its state. |
 | `enforce_context_budget()` | Reduce the history safely, or explain why the request cannot be sent. |
 | `context_call_record()`, `estimation_discrepancy()`, `summarize_context()` | Describe each call and the answer as a whole. |
+| `read_compaction_settings()`, `stored_compaction()`, `compact_request()` | Read the compaction ratios from the existing budget, sanitise the stored summary, and decide whether older saved messages should be folded into it. |
+| `manage_context()`, `tool_results_report()`, `merge_history_report()` | Run one adaptive pass: estimate first, fold history, manage tool results, and report what the pass did and why. |
+| `classify_result()`, `collect_tool_results()`, `classify_counts()` | Classify every tool result in a request from its size and its own metadata, with the reason for the class. |
+| `manage_result()`, `managed_content()`, `trimmed_detail()`, `summarise_result()` | Replace one result with a marked managed representation, or leave it exactly as it was. |
+| `ToolResultStore`, `store()`, `retrieve_raw()` | Retain raw tool results within a byte budget, evicting the oldest first, and retrieve an original again. |
+| `rank_context_items()`, `score_item()`, `decision_summary()` | Score the items of a request deterministically and explain every score. |
+| `message_groups()`, `groups_to_fold()`, `boundary_index()` | Keep a tool call with its tool results, choose how much history to fold with the existing estimates, and find where the stored summary ends. |
+| `summary_request_messages()`, `generate_summary()`, `validate_summary()`, `request_context()` | Build the dedicated no-tools summary request, accept only a usable summary, and rebuild the request around it. |
 | `run_chat_with_tools()` | Run the check before every model call and collect the records. |
 | `buildContextPanel()`, `buildUsagePanel()` in `static/js/app.js` | Render the compact `Context & Budget` and `Token Usage` cards. |
 | `renderAnalytics()`, `analyticsCallTable()`, `analyticsTokenCard()`, `analyticsBudgetCard()`, `analyticsCallsSelector()` in `static/js/app.js` | Build the analytics dashboard for the selected turn. |
 | `analyticsBreakdownRows()`, `analyticsBreakdownTable()`, `analyticsBreakdownTotals()`, `analyticsBreakdownDetails()` in `static/js/app.js` | Render the per-request token estimation breakdown, its totals and its notes. |
 | `selectAnalyticsTurn()`, `syncSelectedTurn()`, `openAnalytics()`, `closeAnalytics()`, `onAnalyticsClick()` in `static/js/app.js` | Keep the panel and the selected turn in agreement, and drive the overlay on narrow screens. |
 | `analyticsSnapshot()`, `analyticsReportText()`, `analyticsCopyButton()`, `copyAnalyticsReport()` in `static/js/app.js` | Read the same snapshot the panel renders, turn it into the plain-text report, and copy it for sharing. |
+| `analyticsCompactionState()`, `storedSummaryLabel()` in `static/js/app.js` | Turn the compaction report and the stored summary into the short labels the panel and the copied report show. |
+| `cleanCompaction()`, `cleanCompactionReport()` in `static/js/store.js` | Keep the stored summary and the per-turn compaction report trustworthy when a conversation is saved or reloaded. |
 | `cleanEstimate()`, `cleanBudgetVerdict()`, `cleanContext()`, `cleanEnum()` in `static/js/store.js` | Keep the stored data - including every new tokenizer field - trustworthy when a conversation is reloaded. |
 | `.workspace`, `.analytics*`, `.topbar__analytics` in `static/app.css` | Lay out the three-part workspace and the overlay behaviour below 1080px. |
 

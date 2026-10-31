@@ -38,6 +38,15 @@ class ChatRequest(BaseModel):
         description="Earlier messages: a list of {role, content} objects",
     )
 
+    compaction: Any = Field(
+        default=None,
+        description=(
+            "The conversation's stored compaction metadata (the summary and the "
+            "message it covers), sent back by the browser so a summary survives an "
+            "application restart. Anything that is not that shape is ignored."
+        ),
+    )
+
 
 @app.get("/")
 def read_index():
@@ -74,6 +83,7 @@ def chat(request: ChatRequest):
 
     usage_out = []
     context_out = []
+    compaction_out = []
     try:
         reply, steps = run_chat_with_tools(
             client,
@@ -82,17 +92,22 @@ def chat(request: ChatRequest):
             usage_out=usage_out,
             context_out=context_out,
             history_count=len(history_messages),
+            compaction=request.compaction,
+            compaction_out=compaction_out,
         )
     except ContextBudgetExceeded as error:
-        return JSONResponse(
-            status_code=413,
-            content={
-                "detail": error.message,
-                "model": model,
-                "rejected": True,
-                "context": error.context,
-            },
-        )
+        content = {
+            "detail": error.message,
+            "model": model,
+            "rejected": True,
+            "context": error.context,
+        }
+        # A refused turn can still have produced a summary before the request was
+        # judged, so it is sent back instead of being thrown away.
+        updated = compaction_out[-1].get("compaction") if compaction_out else None
+        if updated:
+            content["compaction"] = updated
+        return JSONResponse(status_code=413, content=content)
     except Exception as error:
         # 502 = "the other server failed". The browser shows detail as a friendly
         # message; the raw error stays in this server's console.
@@ -105,6 +120,10 @@ def chat(request: ChatRequest):
         payload["usage"] = usage_out[-1]
     if context_out:
         payload["context"] = context_out[-1]
+    if compaction_out:
+        updated = compaction_out[-1].get("compaction")
+        if updated:
+            payload["compaction"] = updated
     return payload
 
 

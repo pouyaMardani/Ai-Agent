@@ -518,13 +518,17 @@ def estimation_discrepancy(estimate, actual):
     }
 
 
-def summarize_context(model, context_records, budget=None, rejected=False):
+def summarize_context(
+    model, context_records, budget=None, rejected=False, compaction=None, tool_results=None
+):
     """Aggregate the per-call context records of one assistant answer.
 
     Estimates and provider-reported usage stay in separate fields on purpose: an
     estimate is what the app expected before a call, `actual` is what the provider
     reported after it. Returns None when no model call happened, so the UI can
-    never show a call that never occurred.
+    never show a call that never occurred. `compaction`, when given, is the public
+    report of the conversation compaction of this turn, and `tool_results` the report
+    of tool-result management: neither carries conversation text.
     """
     records = [record for record in context_records if isinstance(record, dict)]
     if not records:
@@ -557,6 +561,11 @@ def summarize_context(model, context_records, budget=None, rejected=False):
         # The turn's own arithmetic, added up once per request that was really
         # sent, so a per-call breakdown is never counted into two places.
         "estimate_totals": estimate_totals(records),
+        # What summary-based compaction did before this turn's first call, if it
+        # ran at all.
+        "compaction": compaction,
+        # What tool-result management and the adaptive passes did for this turn.
+        "tool_results": tool_results,
         "rejected": bool(rejected),
         "first_call": first,
         "last_call": last,

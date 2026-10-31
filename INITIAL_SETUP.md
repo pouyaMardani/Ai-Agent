@@ -199,6 +199,23 @@ TAVILY_API_KEY=<your Tavily API key>
 TOKENIZER_BACKEND=auto
 TOKENIZER_MODEL_PATH=./tokenizers/deepseek-v4.1
 TOKENIZER_LOCAL_ONLY=true
+
+# --- Context compaction (optional: these are the defaults) ----------------
+# Fold the oldest saved messages into a summary once a request reaches the
+# trigger share of the input budget, aiming to come back down to the target.
+COMPACTION_ENABLED=true
+COMPACTION_TRIGGER_RATIO=0.70
+COMPACTION_TARGET_RATIO=0.50
+
+# --- Context management inside a turn (optional: these are the defaults) ---
+# Manage context before every model request, and manage tool results on their
+# own: large results become a marked managed representation whose raw content
+# stays in a bounded in-memory store.
+ADAPTIVE_COMPACTION_ENABLED=true
+CONTEXT_PRIORITY_ENABLED=true
+TOOL_RESULT_MANAGEMENT_ENABLED=true
+TOOL_RESULT_SUMMARY_THRESHOLD_RATIO=0.15
+TOOL_RESULT_STORE_MAX_BYTES=5242880
 ```
 
 | Key | Required | Default | Purpose |
@@ -214,6 +231,14 @@ TOKENIZER_LOCAL_ONLY=true
 | `TOKENIZER_MODEL_PATH` | no | `./tokenizers/deepseek-v4.1` | Local directory holding the verified tokenizer files. |
 | `TOKENIZER_NAME` | no | unset | A second source: a Hugging Face id or path; with the `tiktoken` backend, the encoding name. |
 | `TOKENIZER_LOCAL_ONLY` | no | `true` | `false` lets a Hugging Face id be fetched once and then reused from the Hugging Face cache. |
+| `COMPACTION_ENABLED` | no | `true` | Summary-based compaction of older messages. `false` keeps the previous behaviour and never asks for a summary. |
+| `COMPACTION_TRIGGER_RATIO` | no | `0.70` | Share of the **input budget** at which compaction runs. Must be between 0 and 1; anything else keeps the default. |
+| `COMPACTION_TARGET_RATIO` | no | `0.50` | Share the compacted request should come back down to. Must be below the trigger, or both ratios fall back to their defaults. |
+| `ADAPTIVE_COMPACTION_ENABLED` | no | `true` | Manage context before **every** model request, not only the first one of a turn. `false` restores the previous single-pass behaviour. |
+| `CONTEXT_PRIORITY_ENABLED` | no | `true` | Order the reduction by the documented priority model. `false` keeps the base weights and the age decay, and says so in the analytics. |
+| `TOOL_RESULT_MANAGEMENT_ENABLED` | no | `true` | Classify tool results and replace the expensive ones with a managed representation. `false` keeps every result exactly as the tool returned it. |
+| `TOOL_RESULT_SUMMARY_THRESHOLD_RATIO` | no | `0.15` | Share of the input budget at which one tool result counts as *large*. Must be between 0 and 1; anything else keeps the default. |
+| `TOOL_RESULT_STORE_MAX_BYTES` | no | `5242880` | Size of the in-memory store holding the raw tool results behind managed representations (5 MiB). |
 
 The values above are placeholders. Real key values are never repeated in this
 document, are read on the server only, and never appear in the browser (not even
@@ -300,6 +325,23 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Otherwise use `.\.venv\Scripts\activate.bat` from `cmd.exe`, or skip activation
 and call `.\.venv\Scripts\python.exe` directly.
 
+**Compaction never seems to run.** It only starts when a *prepared request* reaches
+`COMPACTION_TRIGGER_RATIO` of the input budget (70% by default), so a short chat
+never compacts. Watch for the `[compaction] ...` console line and for the
+`Context compaction` row in the analytics panel. A reason such as "folding would
+leave too little verbatim context" means the saved history is too small to fold
+safely, which is the intended behaviour. `COMPACTION_ENABLED=false` turns the
+feature off completely.
+
+**Tool results are not being reduced.** Tool-result management only runs when a
+prepared request is above the compaction trigger, so a turn that fits is left
+alone. A result is only replaced when it is big enough to be worth it (at least 250
+tokens), has a matching tool call, is not already a managed representation, and its
+raw content could be retained. The console says which of those applied:
+`[context] pass N: ... tool results managed this turn: X`, and the analytics panel's
+`Tool Result Management` section lists the classification, the skipped reasons and
+the priority order. `TOOL_RESULT_MANAGEMENT_ENABLED=false` turns the whole thing off.
+
 **The model or the provider answers with an error.** The API returns `413` when
 the context budget refuses a request locally (nothing was sent) and `502` for a
 provider or tool failure, with a short message in the browser and the raw error
@@ -349,6 +391,10 @@ run offline:
 4. The analytics panel beside the chat reports `Hugging Face
    (deepseek-ai/DeepSeek-V4.1-Flash)`, `Matches this model` and `Exact token
    count`, and its **Copy Analysis** button copies the turn's full report.
+5. Once a conversation grows large enough, the console prints a
+   `[compaction] folded N saved messages: estimated input A -> B tokens ...` line,
+   and the analytics panel shows a `Context compaction` row - while the chat itself
+   still lists every message, because compaction only changes what is sent.
 
 ### Where to read more
 

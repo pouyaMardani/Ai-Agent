@@ -392,9 +392,13 @@ class AppWiringTests(unittest.TestCase):
         self.assertEqual(payload, {"ok": True})
 
     def test_the_chat_request_model_has_the_documented_fields(self):
-        self.assertEqual(sorted(app.ChatRequest.model_fields), ["history", "message"])
+        self.assertEqual(
+            sorted(app.ChatRequest.model_fields), ["compaction", "history", "message"]
+        )
         empty = app.ChatRequest()
         self.assertEqual((empty.message, empty.history), ("", []))
+        # Compaction metadata is optional: a conversation that predates it sends none.
+        self.assertIsNone(empty.compaction)
 
 class SingleFileTests(unittest.TestCase):
     """app.py remains the entry point while tool implementations live in tools/."""

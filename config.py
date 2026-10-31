@@ -38,6 +38,29 @@ ENV_TOKENIZER_NAME = "TOKENIZER_NAME"
 ENV_TOKENIZER_LOCAL_ONLY = "TOKENIZER_LOCAL_ONLY"
 ENV_TOKENIZER_MODEL_PATH = "TOKENIZER_MODEL_PATH"
 
+# Summary-based context compaction. The two ratios are shares of the input budget
+# (context window - output allowance - safety margin) that the existing budget
+# arithmetic already produces.
+ENV_COMPACTION_ENABLED = "COMPACTION_ENABLED"
+ENV_COMPACTION_TRIGGER_RATIO = "COMPACTION_TRIGGER_RATIO"
+ENV_COMPACTION_TARGET_RATIO = "COMPACTION_TARGET_RATIO"
+DEFAULT_COMPACTION_ENABLED = True
+DEFAULT_COMPACTION_TRIGGER_RATIO = 0.70
+DEFAULT_COMPACTION_TARGET_RATIO = 0.50
+
+# Context management inside a turn: adaptive reduction (any model request, not just
+# the first), tool-result management, and deterministic priority scoring.
+ENV_ADAPTIVE_COMPACTION_ENABLED = "ADAPTIVE_COMPACTION_ENABLED"
+ENV_CONTEXT_PRIORITY_ENABLED = "CONTEXT_PRIORITY_ENABLED"
+ENV_TOOL_RESULT_MANAGEMENT_ENABLED = "TOOL_RESULT_MANAGEMENT_ENABLED"
+ENV_TOOL_RESULT_SUMMARY_THRESHOLD_RATIO = "TOOL_RESULT_SUMMARY_THRESHOLD_RATIO"
+ENV_TOOL_RESULT_STORE_MAX_BYTES = "TOOL_RESULT_STORE_MAX_BYTES"
+DEFAULT_ADAPTIVE_COMPACTION_ENABLED = True
+DEFAULT_CONTEXT_PRIORITY_ENABLED = True
+DEFAULT_TOOL_RESULT_MANAGEMENT_ENABLED = True
+DEFAULT_TOOL_RESULT_SUMMARY_THRESHOLD_RATIO = 0.15
+DEFAULT_TOOL_RESULT_STORE_MAX_BYTES = 5242880
+
 
 def load_env_file(path=None):
     """Copy KEY=VALUE lines from .env into the environment.
@@ -85,6 +108,23 @@ def read_positive_int_env(name, default):
         except ValueError:
             value = 0
         if value > 0:
+            return value, "environment"
+    return default, "default"
+
+
+def read_ratio_env(name, default):
+    """Return (ratio, source) for a setting between 0 and 1.
+
+    Anything that is not a real fraction is ignored in favour of `default`, so a
+    typo cannot turn a ratio into something that disables or loops a feature.
+    """
+    raw = env_text(name)
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if 0.0 < value < 1.0:
             return value, "environment"
     return default, "default"
 

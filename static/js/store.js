@@ -12,6 +12,9 @@ export const LIMITS = {
   usageCallsPerMessage: 50,
   contextCallsPerMessage: 50,
   breakdownRowsPerCall: 24,
+  compactionSummaryChars: 12000,
+  priorityDecisionsPerCall: 8,
+  skippedReasonsPerCall: 5,
 };
 
 function createMemoryStorage() {
@@ -295,6 +298,142 @@ function cleanContextCall(raw) {
   };
 }
 
+// --- Compaction -------------------------------------------------------------
+//
+// Compaction metadata belongs to the conversation, not to one request: the summary
+// is what lets older messages stay out of a request without losing what they said.
+// It is stored beside the messages, so it survives a reload, and anything that does
+// not look like a summary is dropped rather than sent back to the server.
+
+export function cleanCompaction(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const summary = typeof raw.summary === "string" ? raw.summary.trim() : "";
+  if (!summary) return null;
+  return {
+    summary: summary.slice(0, LIMITS.compactionSummaryChars),
+    summary_version: cleanTokenCount(raw.summary_version),
+    last_compacted_message_id: cleanText(raw.last_compacted_message_id, 160),
+    last_compacted_at: cleanTokenCount(raw.last_compacted_at),
+    compaction_count: cleanTokenCount(raw.compaction_count),
+  };
+}
+
+// What compaction did before this turn's first model call, if it ran at all. This
+// is a report, never the summary itself.
+function cleanCompactionReport(raw) {
+  if (!raw || typeof raw !== "object" || raw.attempted !== true) return null;
+  return {
+    attempted: true,
+    applied: raw.applied === true,
+    reused: raw.reused === true,
+    attempts: cleanTokenCount(raw.attempts),
+    reason: cleanText(raw.reason, 400),
+    compacted_messages: cleanTokenCount(raw.compacted_messages),
+    estimate_before: cleanTokenCount(raw.estimate_before),
+    estimate_after: cleanTokenCount(raw.estimate_after),
+    met_target: raw.met_target === true,
+    trigger_tokens: cleanTokenCount(raw.trigger_tokens),
+    target_tokens: cleanTokenCount(raw.target_tokens),
+  };
+}
+
+// --- Tool result management -------------------------------------------------
+//
+// What the server did with this turn's tool output: how many results it saw, how it
+// classified them, how many it replaced with a managed representation and what that
+// saved. Every number here is the server's own tokenizer estimate, so it stays apart
+// from the provider-reported usage exactly like the rest of `context`.
+
+function cleanSignedCount(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.round(value);
+}
+
+function cleanPriorityDecision(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const kind = cleanText(raw.kind, 40);
+  if (!kind) return null;
+  return {
+    index: cleanTokenCount(raw.index),
+    kind,
+    score: cleanSignedCount(raw.score),
+    tokens: cleanTokenCount(raw.tokens),
+    reason: cleanText(raw.reason, 400),
+  };
+}
+
+function cleanReasonCounts(raw) {
+  const cleaned = {};
+  Object.entries(raw && typeof raw === "object" ? raw : {})
+    .slice(0, LIMITS.skippedReasonsPerCall)
+    .forEach(([reason, count]) => {
+      const text = cleanText(reason, 160);
+      const value = cleanTokenCount(count);
+      if (text && value !== null) cleaned[text] = value;
+    });
+  return cleaned;
+}
+
+function cleanToolResults(raw) {
+  if (!raw || typeof raw !== "object" || raw.available !== true) return null;
+  const classified = raw.classified && typeof raw.classified === "object" ? raw.classified : {};
+  const priority = raw.priority && typeof raw.priority === "object" ? raw.priority : {};
+  const adaptive = raw.adaptive && typeof raw.adaptive === "object" ? raw.adaptive : {};
+  const requests =
+    raw.management_requests && typeof raw.management_requests === "object" ? raw.management_requests : {};
+  const store = raw.store && typeof raw.store === "object" ? raw.store : {};
+
+  return {
+    available: true,
+    results: cleanTokenCount(raw.results),
+    classified: {
+      small: cleanTokenCount(classified.small),
+      normal: cleanTokenCount(classified.normal),
+      large: cleanTokenCount(classified.large),
+      critical: cleanTokenCount(classified.critical),
+    },
+    managed_results: cleanTokenCount(raw.managed_results),
+    managed_this_turn: cleanTokenCount(raw.managed_this_turn),
+    summarized: cleanTokenCount(raw.summarized),
+    trimmed: cleanTokenCount(raw.trimmed),
+    unchanged: cleanTokenCount(raw.unchanged),
+    original_tokens: cleanTokenCount(raw.original_tokens),
+    managed_tokens: cleanTokenCount(raw.managed_tokens),
+    saved_tokens: cleanTokenCount(raw.saved_tokens),
+    retrievals: cleanTokenCount(raw.retrievals),
+    priority: {
+      enabled: priority.enabled === true,
+      reducible: cleanTokenCount(priority.reducible),
+      decisions: Array.isArray(priority.decisions)
+        ? priority.decisions
+            .slice(0, LIMITS.priorityDecisionsPerCall)
+            .map(cleanPriorityDecision)
+            .filter(Boolean)
+        : [],
+    },
+    adaptive: {
+      passes: cleanTokenCount(adaptive.passes),
+      changed: cleanTokenCount(adaptive.changed),
+      blocked: cleanTokenCount(adaptive.blocked),
+    },
+    management_requests: {
+      calls: cleanTokenCount(requests.calls),
+      failures: cleanTokenCount(requests.failures),
+    },
+    store: {
+      entries: cleanTokenCount(store.entries),
+      bytes: cleanTokenCount(store.bytes),
+      max_bytes: cleanTokenCount(store.max_bytes),
+      evictions: cleanTokenCount(store.evictions),
+      refused: cleanTokenCount(store.refused),
+    },
+    skipped_reasons: cleanReasonCounts(raw.skipped_reasons),
+    notes: Array.isArray(raw.notes)
+      ? raw.notes.map((note) => cleanText(note, 300)).filter(Boolean).slice(0, 4)
+      : [],
+  };
+}
+
 function cleanEstimateTotals(raw) {
   if (!raw || typeof raw !== "object") return null;
   return {
@@ -334,6 +473,8 @@ export function cleanContext(raw) {
     // The turn's own estimate arithmetic, added up once per request that was
     // really sent, so a turn total never counts a breakdown twice.
     estimate_totals: cleanEstimateTotals(raw.estimate_totals),
+    compaction: cleanCompactionReport(raw.compaction),
+    tool_results: cleanToolResults(raw.tool_results),
     rejected: raw.rejected === true,
     first_call: cleanEstimate(raw.first_call),
     last_call: cleanEstimate(raw.last_call),
@@ -386,6 +527,8 @@ function cleanConversation(raw) {
     createdAt,
     updatedAt: Number.isFinite(raw.updatedAt) ? raw.updatedAt : createdAt,
     messages,
+    // A conversation saved before compaction existed simply has none.
+    compaction: cleanCompaction(raw.compaction),
   };
 }
 
@@ -421,6 +564,9 @@ export function writeState(storage, state) {
         createdAt: conversation.createdAt,
         updatedAt: conversation.updatedAt,
         messages: conversation.messages.slice(-LIMITS.messagesPerConversation),
+        // The summary travels with the conversation it describes; null for the
+        // conversations that have never been compacted.
+        compaction: conversation.compaction || null,
       })),
   };
   try {
