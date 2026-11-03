@@ -33,32 +33,30 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 8192
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS = 512
 
-ENV_TOKENIZER_BACKEND = "TOKENIZER_BACKEND"
-ENV_TOKENIZER_NAME = "TOKENIZER_NAME"
-ENV_TOKENIZER_LOCAL_ONLY = "TOKENIZER_LOCAL_ONLY"
-ENV_TOKENIZER_MODEL_PATH = "TOKENIZER_MODEL_PATH"
-
-# Summary-based context compaction. The two ratios are shares of the input budget
-# (context window - output allowance - safety margin) that the existing budget
-# arithmetic already produces.
+# Summary-based conversation compaction. The threshold is an ABSOLUTE provider
+# ACTUAL input token count: a completed response whose reported input reaches it is
+# compacted. It is not an estimate, and this app never measures a request against
+# it before sending. 4659 is the previously derived trigger kept as the default
+# (70% of 8192 - 1024 - 512), now expressed directly in actual tokens.
 ENV_COMPACTION_ENABLED = "COMPACTION_ENABLED"
-ENV_COMPACTION_TRIGGER_RATIO = "COMPACTION_TRIGGER_RATIO"
+ENV_ACTUAL_INPUT_TOKEN_THRESHOLD = "ACTUAL_INPUT_TOKEN_THRESHOLD"
 ENV_COMPACTION_TARGET_RATIO = "COMPACTION_TARGET_RATIO"
 DEFAULT_COMPACTION_ENABLED = True
-DEFAULT_COMPACTION_TRIGGER_RATIO = 0.70
+DEFAULT_ACTUAL_INPUT_TOKEN_THRESHOLD = 4659
+# Share of the saved history kept verbatim when the threshold is exceeded.
 DEFAULT_COMPACTION_TARGET_RATIO = 0.50
 
-# Context management inside a turn: adaptive reduction (any model request, not just
-# the first), tool-result management, and deterministic priority scoring.
-ENV_ADAPTIVE_COMPACTION_ENABLED = "ADAPTIVE_COMPACTION_ENABLED"
+# Context management inside a turn: tool-result management and deterministic
+# priority scoring. `TOOL_RESULT_LARGE_BYTES` is the UTF-8 byte size at or above
+# which one tool result counts as large enough to manage - a byte measurement, not
+# a token estimate.
 ENV_CONTEXT_PRIORITY_ENABLED = "CONTEXT_PRIORITY_ENABLED"
 ENV_TOOL_RESULT_MANAGEMENT_ENABLED = "TOOL_RESULT_MANAGEMENT_ENABLED"
-ENV_TOOL_RESULT_SUMMARY_THRESHOLD_RATIO = "TOOL_RESULT_SUMMARY_THRESHOLD_RATIO"
+ENV_TOOL_RESULT_LARGE_BYTES = "TOOL_RESULT_LARGE_BYTES"
 ENV_TOOL_RESULT_STORE_MAX_BYTES = "TOOL_RESULT_STORE_MAX_BYTES"
-DEFAULT_ADAPTIVE_COMPACTION_ENABLED = True
 DEFAULT_CONTEXT_PRIORITY_ENABLED = True
 DEFAULT_TOOL_RESULT_MANAGEMENT_ENABLED = True
-DEFAULT_TOOL_RESULT_SUMMARY_THRESHOLD_RATIO = 0.15
+DEFAULT_TOOL_RESULT_LARGE_BYTES = 4096
 DEFAULT_TOOL_RESULT_STORE_MAX_BYTES = 5242880
 
 

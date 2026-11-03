@@ -1,1 +1,1 @@
-"""The agent: tokenizer estimation, usage accounting, context budget and the chat loop."""
+"""The agent: provider usage accounting, the context budget and the chat loop."""

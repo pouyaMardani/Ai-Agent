@@ -1,12 +1,10 @@
-"""Token Harbor Chat backend: the HTTP layer, the model loop and static front end.
+"""Token Harbor Chat backend: the HTTP routes and the static front end.
 
-The routes live here; token counting and the chat loop live in the `agent`
-package, and the two tools the model may call live in `tools`. See
-docs/ARCHITECTURE.md for the layout and how a message travels through it.
+The model loop and token accounting live in the `agent` package; the tools the
+model may call live in `tools`.
 
-Run it with:
-    python app.py                      # serves http://127.0.0.1:8000
-    uvicorn app:app --reload           # the same app, reloading while you edit
+    python app.py                 # serves http://127.0.0.1:8000
+    uvicorn app:app --reload      # the same app, reloading while you edit
 """
 
 from typing import Any
@@ -41,9 +39,8 @@ class ChatRequest(BaseModel):
     compaction: Any = Field(
         default=None,
         description=(
-            "The conversation's stored compaction metadata (the summary and the "
-            "message it covers), sent back by the browser so a summary survives an "
-            "application restart. Anything that is not that shape is ignored."
+            "Stored compaction metadata (summary plus the message it covers) sent "
+            "back by the browser. Anything that is not that shape is ignored."
         ),
     )
 
@@ -60,15 +57,36 @@ def read_config():
     return {"ok": True}
 
 
+def describe_error(error, secret=None):
+    """One short, safe line about an unexpected failure, for this console only.
+
+    Bounded to a single trimmed line, so a provider message cannot dump request
+    content here, and the API key is masked if it ever appears.
+    """
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+
+    text = " ".join(str(error or "").split())[:300]
+    if secret:
+        text = text.replace(str(secret), "***")
+
+    line = error.__class__.__name__
+    if status is not None:
+        line += f" (provider status {status})"
+    if text:
+        line += f": {text}"
+    return line
+
+
 @app.post("/api/chat")
 def chat(request: ChatRequest):
-    """Answer one message and report its token usage and context budget.
+    """Answer one message; the model comes from .env, never from the browser.
 
-    The model is chosen by the server from .env, never by the browser. Success is
-    {"reply", "model"} plus "steps" when a tool ran, "usage" for the real token
-    counts the provider reported and "context" for the estimates made before each
-    call. A request that does not fit the context budget is refused locally with
-    413; anything the provider or a tool raised becomes a 502 with a safe message.
+    Answers with {"reply", "model"} plus "steps", "usage", "context", and
+    "compaction" when the stored summary changed. A request the provider refuses as
+    longer than its context limit is reported as 413 with an explanation, and the
+    conversation is left untouched; other failures become a 502.
     """
     settings = get_settings()
     model = settings["model"]
@@ -102,15 +120,15 @@ def chat(request: ChatRequest):
             "rejected": True,
             "context": error.context,
         }
-        # A refused turn can still have produced a summary before the request was
-        # judged, so it is sent back instead of being thrown away.
+        # An earlier response in this turn may already have produced a summary; send
+        # it back so the browser does not have to rebuild the same summary.
         updated = compaction_out[-1].get("compaction") if compaction_out else None
         if updated:
             content["compaction"] = updated
         return JSONResponse(status_code=413, content=content)
     except Exception as error:
-        # 502 = "the other server failed". The browser shows detail as a friendly
-        # message; the raw error stays in this server's console.
+        # The browser gets a fixed safe message; the detail stays in this console.
+        print(f"[error] {describe_error(error, settings.get('api_key'))}", flush=True)
         raise HTTPException(status_code=502, detail=friendly_error(error)) from error
 
     payload = {"reply": reply, "model": model}

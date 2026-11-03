@@ -4,13 +4,19 @@ import json
 
 from openai import BadRequestError
 
-from agent.compaction import manage_context, stored_compaction
+from agent.compaction import (
+    apply_stored_compaction,
+    compact_after_response,
+    manage_tool_results,
+    retry_compaction,
+    stored_compaction,
+)
 from agent.context_budget import (
     ContextBudgetExceeded,
     context_budget_settings,
     context_call_record,
-    enforce_context_budget,
-    estimation_discrepancy,
+    context_limit_message,
+    is_context_limit_error,
     summarize_context,
 )
 from agent.token_usage import extract_call_usage, summarize_usage
@@ -63,18 +69,18 @@ MAX_TOOL_ROUNDS = 3
 MAX_TOOL_CALLS_PER_ROUND = 3
 # The newest messages that may be replayed to the model from the browser history.
 HISTORY_LIMIT = 40
+# The bounded retry after a provider context-length refusal: at most this many re-sends,
+# and only while no tool has run yet, so a retry cannot repeat a side effect.
+MAX_CONTEXT_RETRIES = 1
 
 
 def keep_history(items, limit=HISTORY_LIMIT):
     """Keep only the role and content of the newest browser messages.
 
-    This is input filtering, not a token budget: anything the browser sends that is
-    not a {role, content} pair never reaches the model, and the context budget trims
-    the saved conversation further when a request would be too large.
-
-    A message id, when the browser sends one, is kept as internal bookkeeping under
-    `_id`: it lets compaction record which stored message a summary covers, and
-    provider_messages() strips it again before anything is sent to the model.
+    Input filtering, not a token budget: anything that is not a {role, content}
+    pair never reaches the model. A message id travels as internal `_id` so
+    compaction can record which stored message a summary covers; provider_messages()
+    strips it again before the model is called.
     """
     kept = []
     for item in list(items or [])[-limit:]:
@@ -94,8 +100,7 @@ def keep_history(items, limit=HISTORY_LIMIT):
 def provider_messages(messages):
     """Copy prepared messages without the internal keys this app adds to them.
 
-    The model must receive only the fields the API defines, so the bookkeeping the
-    estimator and the compactor use stays on this side of the request.
+    The model receives only the fields the API defines.
     """
     clean = []
     for message in messages:
@@ -178,27 +183,27 @@ def run_chat_with_tools(
 ):
     """Answer one user turn, running tool calls until the model stops asking.
 
-    Up to MAX_TOOL_ROUNDS tool rounds are allowed; after that the tools are dropped
-    so the model has to answer with what it already has.
+    The turn starts from the conversation's persisted compaction: the stored summary
+    replaces the messages it covers, with no decision and no measurement, so the request
+    already contains the latest successful compaction. This app never counts tokens, so
+    no request is preflighted locally - the provider judges the size. After every model
+    response the provider's *actual* input usage is read, and that one number decides
+    two things:
 
-    Before every model call the request is offered to adaptive context management
-    (agent.compaction.manage_context): above the compaction trigger it folds older
-    saved messages into the stored summary and replaces the least important tool
-    results with managed representations, and below the trigger it does nothing at
-    all. After that the exact messages and tool definitions for that call are
-    estimated and measured against the budget, so a request is trimmed or refused
-    rather than sent over budget.
+    * whether the oldest saved messages are folded into the stored summary (the
+      compaction trigger), and
+    * whether the next request should reduce this turn's older tool results.
 
-    `usage_out`, when given, receives one summary of the real token usage the model
-    calls reported (see summarize_usage()). `context_out`, when given, receives one
-    summary of the pre-request context estimates, the active budget and what context
-    management did (see summarize_context()). `history_count` tells the estimator
-    which messages came from the saved conversation, so its breakdown stays accurate.
-
-    `compaction` is the stored compaction metadata that came with the conversation,
-    and `compaction_out`, when given, receives `{"compaction": metadata}` whenever
-    that metadata changed, which is what the browser needs to store. Management runs
-    once per model request and never edits the messages the caller passed in.
+    Both decisions come from the provider's own count, never from a local estimate.
+    The compacted history is what the next request (or the next user turn) is built
+    from. A provider that refuses a request as too long is recorded as a
+    provider-reported context failure; the loop may fold history and re-send once
+    (never after a tool has run, so no side effect repeats), and when it cannot recover
+    it ends the turn with a readable 413, leaving the conversation exactly as it is.
+    After MAX_TOOL_ROUNDS rounds the tools are dropped and the model answers with what
+    it has. The optional out-lists collect what the caller reports back (`usage_out`,
+    `context_out`) plus the stored summary when it changed (`compaction_out`), and
+    `history_count` marks how many messages came from the saved conversation.
     """
     runner = tool_runner or execute_tool_call
     steps = []
@@ -210,73 +215,114 @@ def run_chat_with_tools(
     tool_executions = 0
     use_tools = True
     rounds = 0
+    context_retries = 0
+    # Usage reported by the summary-generation calls. It is a management statistic,
+    # kept apart from the conversation's own usage, never added to it.
+    management_usage = []
     stored = stored_compaction(compaction)
+    # The request a turn starts from already contains the conversation's latest
+    # successful compaction: the stored summary replaces the messages it covers, with
+    # no decision, no estimate and no model call.
+    messages, history_count = apply_stored_compaction(messages, history_count, stored)
     management = None
+    # Whether the provider's actual input for the previous response was at or above the
+    # compaction trigger. It is the only signal tool-result management may use, and it
+    # starts false because the first request has no previous response.
+    over_trigger = False
 
     while True:
-        # 0. Adaptive context management, before every model request. It estimates
-        #    the whole request itself and acts only above the trigger, so a turn that
-        #    fits pays for nothing. It changes what is sent, never the stored
-        #    conversation, and a failure leaves the request exactly as it was.
-        managed = manage_context(
+        # 0. Before every model request: reduce this turn's older tool results, but only
+        #    when the provider's own reported usage for the previous response was at or
+        #    above the compaction trigger. Nothing here is measured locally.
+        managed = manage_tool_results(
             client,
             model,
             messages,
             history_count,
-            stored,
-            budget=budget,
-            tool_schemas=TOOLS if use_tools else None,
+            over_trigger,
             report=management,
+            management_usage=management_usage,
         )
         messages = managed["messages"]
         history_count = managed["history_count"]
         management = managed["report"]
-        if managed["compaction"]:
-            stored = managed["compaction"]
-            if compaction_out is not None:
-                compaction_out.append({"compaction": stored})
 
-        # 1. Build the exact request: the tool schemas count as input too.
-        prepared = enforce_context_budget(
-            messages,
-            history_count=history_count,
-            tool_schemas=TOOLS if use_tools else None,
-            model=model,
-            budget=budget,
-        )
-        # 2. Refuse rather than send something obviously over budget.
-        if not prepared["accepted"]:
-            rejected = context_call_record(len(context_records) + 1, prepared)
-            raise ContextBudgetExceeded(
-                prepared["reason"],
-                summarize_context(
-                    model,
-                    context_records + [rejected],
-                    budget,
-                    rejected=True,
-                    compaction=(management or {}).get("history"),
-                    tool_results=(management or {}).get("tool_results"),
-                ),
-            )
-
-        messages = prepared["messages"]
-        history_count = prepared["history_count"]
-        record = context_call_record(len(context_records) + 1, prepared)
+        # 1. Send the request. There is no local preflight: this app cannot count the
+        #    tokens of a request it has not sent, so the provider alone judges the size.
+        record = context_call_record(len(context_records) + 1)
         context_records.append(record)
 
-        if use_tools:
-            try:
+        try:
+            if use_tools:
                 response = client.chat.completions.create(
                     model=model,
                     messages=provider_messages(messages),
                     tools=TOOLS,
                     tool_choice="auto",
                 )
-            except BadRequestError as error:
+            else:
+                response = client.chat.completions.create(
+                    model=model, messages=provider_messages(messages)
+                )
+        except BadRequestError as error:
+            # This attempt produced no model response, so it is not a call: forgetting
+            # its record keeps the UI free of calls that never ran.
+            context_records.pop()
+            if is_context_limit_error(error):
+                # The provider refused this request as longer than its context limit.
+                # Record it as a provider-reported context failure; there is no actual
+                # token count for it, so no number is invented.
+                context_records.append(
+                    context_call_record(
+                        len(context_records) + 1, rejected=True, context_failure=True
+                    )
+                )
+                # Bounded recovery: fold the older saved messages and re-send once, but
+                # only when no tool has run yet in this turn (so a re-send cannot repeat
+                # a side effect) and only up to MAX_CONTEXT_RETRIES. Never a loop.
+                if context_retries < MAX_CONTEXT_RETRIES and tool_executions == 0:
+                    context_retries += 1
+                    retried = retry_compaction(
+                        client,
+                        model,
+                        messages,
+                        history_count,
+                        stored,
+                        report=management,
+                        management_usage=management_usage,
+                    )
+                    if retried["changed"]:
+                        messages = retried["messages"]
+                        history_count = retried["history_count"]
+                        if retried["compaction"]:
+                            stored = retried["compaction"]
+                            if compaction_out is not None:
+                                compaction_out.append({"compaction": stored})
+                        print(
+                            "[compaction] folded history and retrying after the provider "
+                            "refused the request as too long",
+                            flush=True,
+                        )
+                        continue
+                # Nothing could be folded, or the retry was already used: fail the turn
+                # with the readable 413 answer and leave the conversation untouched.
+                raise ContextBudgetExceeded(
+                    context_limit_message(budget),
+                    summarize_context(
+                        model,
+                        context_records,
+                        budget,
+                        rejected=True,
+                        compaction=(management or {}).get("history"),
+                        tool_results=(management or {}).get("tool_results"),
+                        management_usage=summarize_usage(management_usage),
+                        context_retries=context_retries,
+                    ),
+                ) from error
+            if use_tools:
+                # The provider refused the tool schemas; retry the same request without
+                # tools rather than failing the whole turn.
                 use_tools = False
-                # This attempt produced no model response, so it is not a call:
-                # forgetting its record keeps the UI free of calls that never ran.
-                context_records.pop()
                 steps.append(
                     {
                         "name": "tools",
@@ -295,16 +341,35 @@ def run_chat_with_tools(
                     flush=True,
                 )
                 continue
-        else:
-            response = client.chat.completions.create(
-                model=model, messages=provider_messages(messages)
-            )
+            raise
 
-        # A real model call just happened: keep the usage it reported, and compare
-        # it with the estimate that was made before the call.
+        # A real model call just happened: keep the usage the provider reported.
         call_usage.append(extract_call_usage(response))
         record["actual"] = call_usage[-1]
-        record["discrepancy"] = estimation_discrepancy(record["estimate"], record["actual"])
+
+        # That actual input number - never a local estimate - decides whether the saved
+        # conversation is compacted now, and whether the next request should reduce this
+        # turn's older tool results.
+        compacted = compact_after_response(
+            client,
+            model,
+            messages,
+            history_count,
+            stored,
+            call_usage[-1],
+            report=management,
+            management_usage=management_usage,
+        )
+        over_trigger = compacted["trigger_exceeded"]
+        if compacted["compaction"]:
+            stored = compacted["compaction"]
+            if compaction_out is not None:
+                compaction_out.append({"compaction": stored})
+        # A compacted history replaces the request; when nothing changed, the request is
+        # kept exactly as it was.
+        if compacted["changed"]:
+            messages = compacted["messages"]
+            history_count = compacted["history_count"]
 
         assistant = response.choices[0].message
         tool_calls = list(getattr(assistant, "tool_calls", None) or [])
@@ -320,6 +385,8 @@ def run_chat_with_tools(
                     budget,
                     compaction=(management or {}).get("history"),
                     tool_results=(management or {}).get("tool_results"),
+                    management_usage=summarize_usage(management_usage),
+                    context_retries=context_retries,
                 )
                 if summary is not None:
                     context_out.append(summary)

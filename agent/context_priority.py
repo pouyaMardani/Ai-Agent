@@ -1,11 +1,10 @@
 """Deterministic priority scoring for the items of one prepared request.
 
-Context management has to decide *what* to reduce before it decides how. This
-module answers that question with a plain additive score: higher means "keep this",
-lower means "this is the least costly thing to reduce". Nothing here estimates
-tokens, calls a model or stores anything - it takes token counts and tool metadata
-from the caller and returns a ranked list with the reasons for every score, so the
-analytics can explain a decision instead of just showing a number.
+Context management has to decide *what* to reduce before it decides how, so this
+module scores every item: higher means "keep this", lower means "reduce this first".
+It takes structural facts and tool metadata from the caller and returns a ranked list
+with the reasons behind every score; it never measures or estimates tokens and never
+calls a model.
 
 The model:
 
@@ -21,18 +20,16 @@ The model:
 | `tool_recent` | 350 | A tool result from the newest round: the model has not read it yet. |
 | `tool_older` | 150 | A tool result from an earlier round. |
 
-Modifiers, applied on top:
+Modifiers on top, all of them structural or metadata-based:
 
-* `critical` tool result: **+200** - a failure or an error message the answer must
-  be able to describe; reduce it last and with special care.
-* `large` tool result: **-100** - the biggest win when it is reduced.
-* already managed result: **-50**, and it is no longer reducible.
-* shares a term with the current request: **+150** - relevance beats age.
-* age: **-2** per message away from the newest, capped at **-200**, so of two
-  otherwise equal items the older one is reduced first.
+* `critical` tool result **+200** (its exact error text matters), already managed
+  **-50** (and no longer reducible), shares a term with the current request **+150**,
+  and age **-2** per message away from the newest, capped at **-200**, so the older
+  of two equal items goes first.
 
-Ties are broken by index: the older message comes first. Every score is the sum of
-documented parts, and `reasons` lists them.
+There is deliberately no size modifier: the runtime does no local token counting, so
+"large" is not a fact this module can know. Ties break by index (older first), and
+`reasons` lists every part of a score.
 """
 
 BASE_SCORES = {
@@ -48,7 +45,6 @@ BASE_SCORES = {
 }
 
 CRITICAL_GAIN = 200
-LARGE_PENALTY = -100
 MANAGED_PENALTY = -50
 RELEVANCE_GAIN = 150
 AGE_PENALTY_PER_STEP = 2
@@ -81,26 +77,6 @@ def matched_terms(terms, content):
     return [term for term in terms if term in haystack]
 
 
-def _kind_for(index, message, history_count, system_count, tool_info, newest_user_index):
-    """Which documented kind one message belongs to."""
-    role = str(message.get("role") or "")
-    if index == 0 and role in ("system", "developer"):
-        return "system"
-    if role == "tool":
-        info = tool_info.get(index) or {}
-        if not info.get("matched", True):
-            return "tool_unmatched"
-        return "tool_recent" if info.get("newest_round") else "tool_older"
-    if index == newest_user_index and role == "user":
-        return "current_user"
-    in_turn = index >= system_count + max(0, history_count)
-    if role == "user":
-        return "turn_user" if in_turn else "history_user"
-    if role == "assistant":
-        return "turn_assistant" if in_turn else "history_assistant"
-    return "history_assistant"
-
-
 def score_item(kind, index, total, message, info=None, terms=(), enabled=True):
     """Return (score, reasons) for one item, exactly as documented above."""
     info = info or {}
@@ -115,9 +91,6 @@ def score_item(kind, index, total, message, info=None, terms=(), enabled=True):
     if info.get("classification") == "critical":
         score += CRITICAL_GAIN
         reasons.append(f"critical tool result ({CRITICAL_GAIN:+d})")
-    if info.get("classification") == "large":
-        score += LARGE_PENALTY
-        reasons.append(f"large tool result ({LARGE_PENALTY:+d})")
     if info.get("managed"):
         score += MANAGED_PENALTY
         reasons.append(f"already a managed representation ({MANAGED_PENALTY:+d})")
@@ -143,8 +116,9 @@ def rank_context_items(messages, history_count=0, tool_info=None, request_text="
     """Rank every item of a prepared request, least important first.
 
     `tool_info` maps a message index to what the tool-result manager knows about
-    it (`tokens`, `classification`, `managed`, `matched`, `newest_round`), so the
-    two modules stay separate: this one scores, the manager measures and reduces.
+    it (`classification`, `managed`, `matched`, `newest_round`), so the two modules
+    stay separate: this one scores, the manager reduces. There is no size fact here,
+    because the runtime does not count tokens.
     """
     items = [message for message in messages if isinstance(message, dict)]
     tool_info = tool_info or {}
@@ -160,25 +134,42 @@ def rank_context_items(messages, history_count=0, tool_info=None, request_text="
             newest_user_index = index
             break
 
+    turn_start = system_count + max(0, history_count)
     ranked = []
     for index, message in enumerate(items):
-        kind = _kind_for(index, message, history_count, system_count, tool_info, newest_user_index)
+        role = str(message.get("role") or "")
         info = tool_info.get(index) or {}
+
+        if index == 0 and role in ("system", "developer"):
+            kind = "system"
+        elif role == "tool":
+            if info.get("matched", True):
+                kind = "tool_recent" if info.get("newest_round") else "tool_older"
+            else:
+                kind = "tool_unmatched"
+        elif role == "user":
+            if index == newest_user_index:
+                kind = "current_user"
+            else:
+                kind = "turn_user" if index >= turn_start else "history_user"
+        elif role == "assistant":
+            kind = "turn_assistant" if index >= turn_start else "history_assistant"
+        else:
+            kind = "history_assistant"
+
         score, reasons = score_item(kind, index, total, message, info, terms, enabled)
         ranked.append(
             {
                 "index": index,
                 "kind": kind,
                 "score": score,
-                "tokens": info.get("tokens"),
                 "classification": info.get("classification"),
                 "reducible": kind in REDUCIBLE_KINDS and not bool(info.get("managed")),
                 "reasons": reasons,
             }
         )
 
-    # Least important first, and ties go to the older message, so the order is
-    # stable across runs and never depends on dictionary iteration order.
+    # Least important first; ties go to the older message, so the order is stable.
     ranked.sort(key=lambda item: (item["score"], -item["index"]))
     return ranked
 
@@ -193,7 +184,7 @@ def decision_summary(ranked, limit=8):
                 "index": item["index"],
                 "kind": item["kind"],
                 "score": item["score"],
-                "tokens": item["tokens"],
+                "classification": item["classification"],
                 "reason": "; ".join(item["reasons"]),
             }
             for item in reducible[:limit]

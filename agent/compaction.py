@@ -1,53 +1,51 @@
-"""Summary-based context compaction.
+"""Post-response conversation compaction and pre-request tool-result management.
 
-A request carries the system prompt, the newest user message and the messages the
-browser kept for the conversation. When that request approaches the configured
-input budget, this module folds the *oldest saved messages* into a persistent
-summary and sends the summary in their place, so the recent turns stay verbatim
-and nothing is deleted from the stored conversation.
+Conversation compaction is decided AFTER a model response, from the actual input
+token count the provider reported for that response. The request that produced it was
+sent with whatever summary the conversation already carried; when the reported input
+is at or above the compaction trigger, the oldest saved messages are folded into the
+summary and that compacted history is what the next request (or the next user turn)
+is built from.
 
-Two things are kept apart on purpose:
+Nothing in this module counts tokens. A response that reported no usable input usage
+is never compacted and no local estimate is substituted for it; how much is folded is
+decided structurally (how many saved-message groups stay verbatim), never by an
+estimate of the request's size.
 
-* **Stored history** - the messages the browser keeps for display and continuity.
-  Compaction never edits them; it only records which of them the summary covers.
-* **Request context** - the messages actually sent, which may hold the summary
-  instead of the older messages.
+Tool-result management is a separate, pre-request pass. It runs only when the
+provider's own reported usage for the previous response was at or above the trigger,
+so its trigger is a fact the provider gave us, never a number this app guessed.
 
-The summary belongs to the conversation that owns it: the browser stores it and
-sends it back with the next request, so this module is stateless. It reads the
-stored metadata, decides, and returns new metadata for the caller to persist.
-Nothing here writes to disk, and nothing here changes the tool-calling loop or the
-context budget: the budget stays the judge of what may be sent.
+The stored conversation is never rewritten: the browser keeps every message, and
+this module only records which message the summary covers. The summary travels with
+the conversation (the browser stores it and sends it back), so this module stays
+stateless.
 """
 
 import json
 import time
 
 from agent import context_priority, tool_result_manager
-from agent.context_budget import context_budget_settings, estimate_context
-from agent.tokenizer import load_tokenizer
+from agent.token_usage import extract_call_usage
 from config import (
-    DEFAULT_ADAPTIVE_COMPACTION_ENABLED,
+    DEFAULT_ACTUAL_INPUT_TOKEN_THRESHOLD,
     DEFAULT_COMPACTION_ENABLED,
     DEFAULT_COMPACTION_TARGET_RATIO,
-    DEFAULT_COMPACTION_TRIGGER_RATIO,
     DEFAULT_CONTEXT_PRIORITY_ENABLED,
-    ENV_ADAPTIVE_COMPACTION_ENABLED,
+    ENV_ACTUAL_INPUT_TOKEN_THRESHOLD,
     ENV_COMPACTION_ENABLED,
     ENV_COMPACTION_TARGET_RATIO,
-    ENV_COMPACTION_TRIGGER_RATIO,
     ENV_CONTEXT_PRIORITY_ENABLED,
+    read_positive_int_env,
     read_ratio_env,
     read_truthy_env,
 )
 
-# Bumped when the meaning of the stored summary changes, so an older summary can
-# be recognised instead of trusted blindly.
+# Bumped when the meaning of the stored summary changes.
 COMPACTION_VERSION = 1
 
-# The structure the model is asked to write. A summary that ignores the headings
-# is still accepted: refusing good summaries over formatting would lose more than
-# it protects.
+# The structure the model is asked to write. A summary in another shape is still
+# accepted: refusing good summaries over formatting would lose more than it protects.
 SUMMARY_HEADINGS = (
     "Project / Conversation Context",
     "Important Facts",
@@ -58,22 +56,15 @@ SUMMARY_HEADINGS = (
     "Unresolved Questions",
 )
 
-# A summary has to be able to carry a conversation; outside these bounds it is not
-# something worth storing over the previous one.
+# A summary has to be able to carry a conversation.
 MIN_SUMMARY_CHARS = 80
 MAX_SUMMARY_CHARS = 12000
 
-# Folding history must never leave less than this much verbatim recent context. It
-# is a floor, not a strategy: how much is folded is decided by the budget.
-MIN_RECENT_HISTORY_TOKENS = 512
+# Folding must never leave less than this many saved messages verbatim. It is a
+# structural floor, not a size: the runtime does not measure tokens.
+MIN_RECENT_HISTORY_MESSAGES = 6
 
-# What the summary is expected to cost inside a request, used only to choose the
-# split before the summary exists. Once it exists, its real size is measured.
-SUMMARY_ALLOWANCE_TOKENS = 600
-# Output allowance for the dedicated summary request.
 SUMMARY_MAX_OUTPUT_TOKENS = 1024
-# A single very long message is capped in the transcript so the summary request
-# itself stays bounded; the marker says so in the text.
 TRANSCRIPT_MESSAGE_MAX_CHARS = 4000
 TRANSCRIPT_MARKER = "[...further text of this message was left out of the summary request...]"
 
@@ -97,49 +88,35 @@ SUMMARY_SYSTEM_PROMPT = (
 )
 
 
-def read_compaction_settings(budget=None):
-    """Read the compaction switches, measured against the existing budget.
+def read_compaction_settings():
+    """Read the compaction switches.
 
-    The ratios are shares of the input budget the context budget already computes,
-    so compaction and enforcement always use the same arithmetic. A target that is
-    not below the trigger would ask for compaction on every call, so that pair
-    falls back to the documented defaults instead.
+    `trigger_tokens` is the threshold the provider's ACTUAL input usage is compared
+    with. It is an absolute token count read straight from configuration - never a
+    share of a budget this app measured, and never compared with any request before
+    it is sent. `verbatim_ratio` says how much of the saved history stays verbatim
+    when the threshold is exceeded.
     """
-    budget = budget or context_budget_settings()
-    trigger, trigger_source = read_ratio_env(
-        ENV_COMPACTION_TRIGGER_RATIO, DEFAULT_COMPACTION_TRIGGER_RATIO
+    trigger_tokens, trigger_source = read_positive_int_env(
+        ENV_ACTUAL_INPUT_TOKEN_THRESHOLD, DEFAULT_ACTUAL_INPUT_TOKEN_THRESHOLD
     )
     target, target_source = read_ratio_env(
         ENV_COMPACTION_TARGET_RATIO, DEFAULT_COMPACTION_TARGET_RATIO
     )
-    if target >= trigger:
-        trigger, trigger_source = DEFAULT_COMPACTION_TRIGGER_RATIO, "default"
-        target, target_source = DEFAULT_COMPACTION_TARGET_RATIO, "default"
-
-    max_input = max(0, int(budget.get("max_input_budget_tokens") or 0))
     enabled = read_truthy_env(ENV_COMPACTION_ENABLED, DEFAULT_COMPACTION_ENABLED)
-    if max_input <= 0:
-        # Without an input budget there is nothing to measure against, so the safe
-        # answer is to leave the existing behaviour alone.
-        enabled = False
 
     return {
         "enabled": bool(enabled),
-        "trigger_ratio": trigger,
-        "target_ratio": target,
-        "trigger_tokens": int(max_input * trigger),
-        "target_tokens": int(max_input * target),
-        "max_input_budget_tokens": max_input,
-        "ratio_source": {"trigger": trigger_source, "target": target_source},
+        "verbatim_ratio": target,
+        "trigger_tokens": int(trigger_tokens),
+        "threshold_source": trigger_source,
+        "ratio_source": {"verbatim": target_source},
     }
-
-
 def stored_compaction(raw):
     """Sanitize compaction metadata that arrived with a conversation.
 
-    A conversation saved before compaction existed simply has none, and anything
-    that does not look like metadata is ignored rather than trusted: the summary is
-    conversation state, so it is only ever bounded text.
+    A conversation saved before compaction existed has none, and anything that does
+    not look like metadata is ignored rather than trusted.
     """
     if not isinstance(raw, dict):
         return None
@@ -181,28 +158,31 @@ def public_report(result):
     """The part of a compaction result that is safe to store and show.
 
     No conversation text: the summary belongs to the conversation, not to the
-    per-turn analytics record.
+    per-turn analytics record. `actual_input_tokens` is the provider count the
+    decision was made from; there is no estimated size in here, because the runtime
+    never measures one.
     """
     keys = (
+        "post_response",
         "attempted",
         "applied",
         "reused",
         "reason",
         "compacted_messages",
-        "estimate_before",
-        "estimate_after",
-        "met_target",
         "trigger_tokens",
-        "target_tokens",
+        "actual_input_tokens",
+        "usage_available",
+        "trigger_exceeded",
+        "summary_requests",
     )
     return {key: result.get(key) for key in keys}
 
 
 def request_parts(messages, history_count):
-    """Split a prepared request into its system block, saved history and this turn.
+    """Split a prepared request into system block, saved history and this turn.
 
-    `history_count` is the same number the context budget uses, so these three
-    parts are exactly the parts the estimate is built from.
+    `history_count` is how many messages came from the saved conversation, so the
+    three parts match the boundary the caller tracks.
     """
     ordered = [message for message in messages if isinstance(message, dict)]
     first = ordered[0] if ordered else None
@@ -217,11 +197,10 @@ def request_parts(messages, history_count):
 def message_groups(messages):
     """Group saved messages so a tool call and its results stay together.
 
-    An assistant message that asks for tools and the tool results answering it are
-    one logical group: folding or dropping one without the other would leave an
-    unresolved tool call in the request, which providers reject. Everything else is
-    a group of one, and a malformed group is kept whole rather than repaired, so
-    nothing is invented about what the model and the tools really did.
+    An assistant message that asks for tools and the results answering it are one
+    group: folding one without the other would leave an unresolved tool call, which
+    providers reject. Everything else is a group of one, and a malformed group is
+    kept whole rather than repaired.
     """
     items = [message for message in messages if isinstance(message, dict)]
     groups = []
@@ -240,49 +219,11 @@ def message_groups(messages):
         groups.append(group)
     return groups
 
-
-def summary_cost_tokens(model, summary):
-    """What inserting this summary into a request costs, by the existing estimator."""
-    if not summary:
-        return SUMMARY_ALLOWANCE_TOKENS
-    text = summary_block(summary)
-    return estimate_context([{"role": "system", "content": text}], None, 0, model)[
-        "estimated_input_tokens"
-    ]
-
-
-def groups_to_fold(model, groups, total_tokens, summary_tokens, target_tokens, floor_tokens):
-    """Choose how many of the oldest groups to fold into the summary.
-
-    The arithmetic is the estimate's own: `estimated_input_tokens` is the sum of its
-    messages, so removing a group removes exactly that group's estimate. Folding
-    stops when the request would fit the target, or when keeping any less verbatim
-    history would drop below the floor. The target is a goal, never a reason to
-    throw away context that is still needed.
-    """
-    sizes = [
-        estimate_context(group, None, 0, model)["estimated_input_tokens"] for group in groups
-    ]
-    remaining = sum(sizes)
-    folded = 0
-    removed = 0
-    while folded < len(groups):
-        if total_tokens - removed + summary_tokens <= target_tokens:
-            break
-        if remaining - sizes[folded] < floor_tokens:
-            break
-        removed += sizes[folded]
-        remaining -= sizes[folded]
-        folded += 1
-    return folded
-
-
 def boundary_index(history, message_id):
     """Where the stored summary ends inside this request's saved history.
 
-    The id is the browser's message id, carried as internal bookkeeping. None means
-    that message is no longer in the window, so the caller cannot tell which of
-    these messages the previous summary already covers.
+    The id is the browser's message id. None means it is no longer in the window, so
+    the caller cannot tell which messages the previous summary already covers.
     """
     if not message_id:
         return None
@@ -344,11 +285,13 @@ def summary_request_messages(previous_summary, material, overlap=False):
     ]
 
 
-def generate_summary(client, model, request_messages):
+def generate_summary(client, model, request_messages, usage_out=None):
     """Ask the configured model for one summary. Returns (summary, reason).
 
-    This is a request of its own: no tools, so the model cannot start a tool cycle
-    from inside it, and a failed call is reported rather than retried.
+    A request of its own with no tools, so it cannot start a tool cycle; a failure is
+    reported, never retried. It is a management call, not a conversation request, so
+    its usage is appended to `usage_out` (kept separate from the conversation's own
+    usage) rather than treated as the actual usage of the turn.
     """
     try:
         response = client.chat.completions.create(
@@ -360,6 +303,9 @@ def generate_summary(client, model, request_messages):
         return None, (
             f"the summary request failed ({error.__class__.__name__}: {str(error).strip()[:200]})"
         )
+
+    if usage_out is not None:
+        usage_out.append(extract_call_usage(response))
 
     choices = getattr(response, "choices", None) or []
     if not choices:
@@ -375,9 +321,8 @@ def generate_summary(client, model, request_messages):
 def validate_summary(text, previous_summary=None):
     """Accept a summary only when it is usable. Returns (summary, reason).
 
-    The headings are not required: a good summary written in another shape is kept,
-    and a bad one is refused whatever shape it has. Anything refused leaves the
-    previous summary in place, because a worse summary is not an improvement.
+    Headings are not required. Whatever is refused leaves the previous summary in
+    place, because a worse summary is not an improvement.
     """
     if not isinstance(text, str):
         return None, "the summary was not text"
@@ -396,10 +341,9 @@ def validate_summary(text, previous_summary=None):
 def request_context(system_block, summary, recent, turn):
     """Assemble the compacted request: system prompt + summary, then recent turns.
 
-    The summary is appended to the existing system prompt rather than sent as a
-    second system message, so the app's own rules stay first and the request keeps
-    the shape the provider already accepts. The active turn follows unchanged,
-    which is what keeps this turn's tool calls and results in their original order.
+    The summary is appended to the existing system prompt, so the app's own rules
+    stay first and the request keeps the shape the provider accepts. The active turn
+    follows unchanged, which keeps this turn's tool calls and results in order.
     """
     context = []
     if system_block:
@@ -417,64 +361,93 @@ def request_context(system_block, summary, recent, turn):
     context.extend(turn)
     return context
 
+def apply_stored_compaction(messages, history_count, stored):
+    """Rebuild one request around the summary the conversation already carries.
 
-def compact_request(client, model, messages, history_count, stored, budget=None, tool_schemas=None):
-    """Fold older saved messages into the summary when this request needs it.
+    A user turn starts from the conversation's latest successful compaction, not from
+    the raw history: the stored summary replaces the messages it covers (everything up
+    to and including `last_compacted_message_id`) and the messages after it stay
+    verbatim. This makes no decision and calls no model, and it measures nothing, so it
+    is not the trigger-based pre-request compaction - it only applies a compaction that
+    already happened. When the boundary message is no longer in the request, every kept
+    message is newer than the summary, so the summary is simply placed before them.
 
-    `stored` is the compaction metadata that came with the conversation, or None for
-    a conversation that has never been compacted. The result always carries
-    `messages` and `history_count` for the caller to use from now on, `attempted`
-    when the trigger was reached, `applied` or `reused` when the request context was
-    compacted, `reason` in words when it was not, and `compaction` - the metadata to
-    persist - only when it changed.
-
-    Every failure returns the request exactly as it arrived, so the existing budget
-    enforcement still decides what may be sent and the stored conversation keeps its
-    messages.
+    Returns (messages, history_count); both are unchanged when the conversation carries
+    no summary.
     """
-    settings = read_compaction_settings(budget)
-    before = int(
-        estimate_context(messages, tool_schemas, history_count, model).get("estimated_input_tokens")
-        or 0
-    )
-    result = {
-        "attempted": False,
-        "applied": False,
-        "reused": False,
-        "reason": None,
-        "compacted_messages": 0,
-        "estimate_before": before,
-        "estimate_after": None,
-        "met_target": False,
-        "trigger_tokens": settings["trigger_tokens"],
-        "target_tokens": settings["target_tokens"],
-        "messages": messages,
-        "history_count": history_count,
-        "compaction": None,
-    }
+    previous = stored or {}
+    summary = previous.get("summary")
+    if not summary:
+        return messages, history_count
 
-    if not settings["enabled"] or before < settings["trigger_tokens"]:
-        return result
+    system_block, history, turn = request_parts(messages, history_count)
+    boundary = boundary_index(history, previous.get("last_compacted_message_id"))
+    kept = history if boundary is None else history[boundary + 1 :]
+    return request_context(system_block, summary, kept, turn), len(kept)
 
-    result["attempted"] = True
+
+def actual_input_tokens(actual_usage):
+    """The provider's actual input token count, or None when it is unusable.
+
+    Cached input tokens are a subset of the provider's input count, never something
+    added to it, so they are not read here. A missing usage block, a missing input
+    field or a negative value returns None: a missing actual count is never replaced
+    with a local estimate.
+    """
+    if not isinstance(actual_usage, dict):
+        return None
+    value = actual_usage.get("input_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def groups_to_fold(groups, verbatim_ratio):
+    """Choose how many of the oldest saved-message groups to fold.
+
+    Without local token estimates there is nothing to measure the reduction against,
+    so the rule is structural and deterministic: keep roughly `verbatim_ratio` of the
+    saved groups verbatim (never fewer than MIN_RECENT_HISTORY_MESSAGES, and never all
+    of them) and fold the rest. A group is always folded whole.
+    """
+    total = len(groups)
+    if total <= 1:
+        return 0
+    keep = max(MIN_RECENT_HISTORY_MESSAGES, int(round(total * verbatim_ratio)))
+    keep = min(keep, total - 1)
+    return total - keep
+
+def fold_into_summary(
+    client,
+    model,
+    messages,
+    history_count,
+    stored,
+    verbatim_ratio,
+    result,
+    trigger_label,
+    reason_prefix,
+    management_usage=None,
+):
+    """Fold the oldest saved-message groups into the stored summary.
+
+    One implementation for the two callers that may shrink a request: the
+    post-response compaction (which sets `verbatim_ratio` from configuration) and the
+    bounded retry after a provider context-length error (which passes 0.0, folding
+    down to the structural floor). The summary is produced by a separate, tool-free
+    model call whose own usage is collected into `management_usage`, never into the
+    conversation's usage. A failure leaves the request exactly as it arrived.
+    """
+    result.update(messages=messages, history_count=history_count, compaction=None)
+
     system_block, history, turn = request_parts(messages, history_count)
     groups = message_groups(history)
     previous = stored or {}
     previous_summary = previous.get("summary")
 
-    fold_count = groups_to_fold(
-        model,
-        groups,
-        before,
-        summary_cost_tokens(model, previous_summary),
-        settings["target_tokens"],
-        MIN_RECENT_HISTORY_TOKENS,
-    )
+    fold_count = groups_to_fold(groups, verbatim_ratio)
     if fold_count <= 0:
-        result["reason"] = (
-            "the request is over the compaction trigger, but folding would leave too "
-            "little verbatim context, so nothing was compacted"
-        )
+        result["reason"] = reason_prefix + ", but there is too little saved history to fold"
         return result
 
     folded = [message for group in groups[:fold_count] for message in group]
@@ -493,14 +466,20 @@ def compact_request(client, model, messages, history_count, stored, budget=None,
         result["reason"] = "the folded messages are already covered by the stored summary"
         summary_text = previous_summary
     else:
+        result["summary_requests"] = int(result.get("summary_requests") or 0) + 1
         text, reason = generate_summary(
             client,
             model,
             summary_request_messages(
                 previous_summary,
                 material,
-                overlap=boundary is None and bool(previous_summary),
+                # The stored compaction is applied before this pass, so everything
+                # folded here is new. Its coverage is only unknown when the stored
+                # metadata carried no boundary id at all.
+                overlap=bool(previous_summary)
+                and not previous.get("last_compacted_message_id"),
             ),
+            usage_out=management_usage,
         )
         if text is None:
             result["reason"] = reason
@@ -514,40 +493,106 @@ def compact_request(client, model, messages, history_count, stored, budget=None,
             previous, summary_text, str(folded[-1].get("_id") or "") or None
         )
 
-    compacted = request_context(system_block, summary_text, recent, turn)
-    after = int(
-        estimate_context(compacted, tool_schemas, len(recent), model).get("estimated_input_tokens")
-        or 0
-    )
-    result["messages"] = compacted
+    result["messages"] = request_context(system_block, summary_text, recent, turn)
     result["history_count"] = len(recent)
     result["compacted_messages"] = len(folded)
-    result["estimate_after"] = after
-    result["met_target"] = after <= settings["target_tokens"]
 
     print(
         "[compaction] "
         + ("folded" if result["applied"] else "reused the stored summary for")
-        + f" {len(folded)} saved messages: estimated input {before} -> {after} tokens "
-        + f"(trigger {settings['trigger_tokens']}, target {settings['target_tokens']}, "
-        + f"target met: {'yes' if result['met_target'] else 'no'})",
+        + f" {len(folded)} of {len(groups)} saved-message group(s) {trigger_label}: "
+        + f"{len(recent)} group(s) kept verbatim",
         flush=True,
     )
     return result
 
 
-def empty_management_report(compaction_settings, tool_settings, priority_enabled):
-    """The per-turn report of adaptive context management, before anything runs."""
+def compact_request(
+    client, model, messages, history_count, stored, actual_input, result, management_usage=None
+):
+    """Run the post-response compaction for a response whose actual input crossed the
+    threshold. The provider's actual count is recorded as reported and never
+    recomputed; how much stays verbatim comes from the configured ratio.
+    """
+    settings = read_compaction_settings()
+    return fold_into_summary(
+        client,
+        model,
+        messages,
+        history_count,
+        stored,
+        settings["verbatim_ratio"],
+        result,
+        trigger_label=(
+            f"after actual provider input {actual_input} tokens "
+            f"(threshold {settings['trigger_tokens']})"
+        ),
+        reason_prefix="the provider's actual input is over the compaction threshold",
+        management_usage=management_usage,
+    )
+
+
+def retry_compaction(client, model, messages, history_count, stored, report=None, management_usage=None):
+    """Fold history after the provider refused a request as too long.
+
+    Used only by the bounded retry in the chat loop, and only when no tool has run yet
+    in this turn, so re-sending the request cannot repeat a side effect. With no
+    actual usage to compare against - the provider's rejection is the only signal - it
+    folds every saved-message group down to the structural floor. `changed` is False
+    when nothing could be folded, and the caller then gives up instead of retrying.
+    """
+    settings = read_compaction_settings()
+    result = {
+        "post_response": True,
+        "attempted": True,
+        "applied": False,
+        "reused": False,
+        "reason": None,
+        "compacted_messages": 0,
+        "trigger_tokens": settings["trigger_tokens"],
+        "actual_input_tokens": None,
+        "usage_available": False,
+        "trigger_exceeded": False,
+        "summary_requests": 0,
+        "messages": messages,
+        "history_count": history_count,
+        "compaction": None,
+    }
+    folded = fold_into_summary(
+        client,
+        model,
+        messages,
+        history_count,
+        stored,
+        0.0,
+        result,
+        trigger_label="after the provider refused the request as too long",
+        reason_prefix="the provider refused the request as longer than its context limit",
+        management_usage=management_usage,
+    )
+    if report is not None:
+        report["history"] = merge_history_report(report.get("history"), folded)
+    return {
+        "messages": folded["messages"],
+        "history_count": folded["history_count"],
+        "compaction": folded["compaction"],
+        "changed": bool(folded["applied"] or folded["reused"]),
+        "trigger_exceeded": False,
+    }
+
+def empty_management_report(tool_settings, priority_enabled):
+    """The per-turn report of tool-result management, before anything runs.
+
+    It carries counts, classes, decisions, byte sizes and store numbers only. There
+    is no token count anywhere: the runtime does not estimate tokens, so the only
+    sizes are UTF-8 byte measurements of the tool output itself.
+    """
     store_stats = tool_result_manager.store(tool_settings["store_max_bytes"]).stats()
     return {
         "passes": 0,
         "changed_passes": 0,
         "blocked_passes": 0,
-        "trigger_tokens": compaction_settings["trigger_tokens"],
-        "target_tokens": compaction_settings["target_tokens"],
         "history": None,
-        "estimate_before": None,
-        "estimate_after": None,
         "counters": {
             "summarized": 0,
             "trimmed": 0,
@@ -559,18 +604,18 @@ def empty_management_report(compaction_settings, tool_settings, priority_enabled
         "tool_results": {
             "available": False,
             "results": 0,
-            "classified": {"small": 0, "normal": 0, "large": 0, "critical": 0},
+            "classified": {"critical": 0, "normal": 0},
+            "bytes": 0,
+            "managed_bytes": 0,
+            "large_candidates": 0,
+            "large_bytes": tool_settings.get("large_bytes"),
             "managed_results": 0,
             "managed_this_turn": 0,
             "summarized": 0,
             "trimmed": 0,
             "unchanged": 0,
-            "original_tokens": 0,
-            "managed_tokens": 0,
-            "saved_tokens": 0,
             "retrievals": 0,
             "priority": {"enabled": bool(priority_enabled), "reducible": 0, "decisions": []},
-            "adaptive": {"passes": 0, "changed": 0, "blocked": 0},
             "management_requests": {"calls": 0, "failures": 0},
             "store": store_stats,
             "skipped_reasons": {},
@@ -603,17 +648,17 @@ def remember_skip(counters, reason):
         skips.pop(smallest[0], None)
 
 
-def merge_history_report(previous, folded):
-    """Fold one conversation-compaction attempt into the turn's history report.
+def merge_history_report(previous, current):
+    """Fold one post-response compaction evaluation into the turn's history report.
 
-    The report describes the turn: the first attempt's `before`, the latest
-    attempt's `after`, and whether anything was applied at any point.
+    The report keeps whether compaction was triggered and applied at any point, plus
+    the latest provider actual input, so the analytics describe the newest completed
+    decision rather than a stale one. Nothing here is estimated.
     """
-    current = public_report(folded)
+    current = public_report(current)
     if previous is None:
         merged = dict(current)
         merged["attempts"] = 1 if current.get("attempted") else 0
-        merged["estimate_after"] = current.get("estimate_after")
         return merged
 
     merged = dict(previous)
@@ -623,26 +668,31 @@ def merge_history_report(previous, folded):
     merged["compacted_messages"] = int(previous.get("compacted_messages") or 0) + int(
         current.get("compacted_messages") or 0
     )
-    if current.get("estimate_after") is not None:
-        merged["estimate_after"] = current.get("estimate_after")
-    if current.get("target_tokens") is not None:
-        merged["target_tokens"] = current.get("target_tokens")
-    merged["met_target"] = bool(previous.get("met_target")) or bool(current.get("met_target"))
+    merged["summary_requests"] = int(previous.get("summary_requests") or 0) + int(
+        current.get("summary_requests") or 0
+    )
+    merged["trigger_exceeded"] = bool(previous.get("trigger_exceeded")) or bool(
+        current.get("trigger_exceeded")
+    )
+    # The newest evaluation describes the latest provider count and whether it was
+    # available at all.
+    if current.get("actual_input_tokens") is not None:
+        merged["actual_input_tokens"] = current.get("actual_input_tokens")
+    merged["usage_available"] = bool(current.get("usage_available"))
     if not merged["applied"] and not merged["reused"]:
         merged["reason"] = current.get("reason")
     else:
         merged["reason"] = None
     return merged
 
-
-def tool_results_report(messages, counter, settings, aggregate, history_count, request_text, priority_enabled):
+def tool_results_report(messages, settings, aggregate, history_count, request_text, priority_enabled):
     """Build the tool-result section from the request as it stands now.
 
-    Sizes and classes are measured again on every pass - the counter is memoised per
-    text, so the repeat work is a dictionary lookup - while what management *did* is
-    cumulative for the turn and the store numbers are deltas since the turn began.
+    Counts, classes and byte sizes are measured again each pass, while what management
+    did is cumulative for the turn and the store numbers are deltas. There is no token
+    count in here: every size is a UTF-8 byte measurement.
     """
-    items, info_by_index = tool_result_manager.collect_tool_results(messages, counter, settings)
+    items, info_by_index = tool_result_manager.collect_tool_results(messages)
     ranked = context_priority.rank_context_items(
         messages,
         history_count=history_count,
@@ -651,17 +701,10 @@ def tool_results_report(messages, counter, settings, aggregate, history_count, r
         enabled=priority_enabled,
     )
     counts = tool_result_manager.classify_counts(items)
-
-    original = 0
-    managed = 0
-    managed_results = 0
-    for item in items:
-        tokens = int(item["tokens"] or 0)
-        raw = item.get("original_tokens")
-        original += int(raw) if isinstance(raw, int) else tokens
-        managed += tokens
-        if item["managed"]:
-            managed_results += 1
+    managed_results = sum(1 for item in items if item["managed"])
+    total_bytes = sum(int(item.get("bytes") or 0) for item in items)
+    managed_bytes = sum(int(item.get("bytes") or 0) for item in items if item["managed"])
+    large_candidates = sum(1 for item in items if item.get("large"))
 
     counters = aggregate["counters"]
     store_stats = tool_result_manager.store(settings["store_max_bytes"]).stats()
@@ -673,10 +716,14 @@ def tool_results_report(messages, counter, settings, aggregate, history_count, r
         notes.append("tool result management is switched off by configuration")
     if items and not any(item["matched"] for item in items):
         notes.append("no tool result could be matched to a tool call, so none was replaced")
+    if items and not large_candidates:
+        notes.append(
+            f"no result reached the {settings['large_bytes']}-byte threshold, so none was reduced"
+        )
     if counts["critical"]:
         notes.append(
             f"{counts['critical']} result(s) report a failure: they are kept, and reduced only "
-            "by deterministic trimming when the request needs it"
+            "by deterministic trimming"
         )
     if not priority_enabled:
         notes.append("priority scoring is disabled: base weights and age decide the order")
@@ -690,24 +737,20 @@ def tool_results_report(messages, counter, settings, aggregate, history_count, r
         "available": True,
         "results": len(items),
         "classified": counts,
+        "bytes": total_bytes,
+        "managed_bytes": managed_bytes,
+        "large_candidates": large_candidates,
+        "large_bytes": settings["large_bytes"],
         "managed_results": managed_results,
         "managed_this_turn": counters["managed_this_turn"],
         "summarized": counters["summarized"],
         "trimmed": counters["trimmed"],
         "unchanged": len(items) - managed_results,
-        "original_tokens": original,
-        "managed_tokens": managed,
-        "saved_tokens": max(0, original - managed),
         "retrievals": max(0, int(store_stats.get("retrievals", 0)) - int(baseline.get("retrievals") or 0)),
         "priority": {
             "enabled": bool(priority_enabled),
             "reducible": decisions["reducible"],
             "decisions": decisions["decisions"],
-        },
-        "adaptive": {
-            "passes": aggregate["passes"],
-            "changed": aggregate["changed_passes"],
-            "blocked": aggregate["blocked_passes"],
         },
         "management_requests": {
             "calls": counters["management_calls"],
@@ -720,162 +763,193 @@ def tool_results_report(messages, counter, settings, aggregate, history_count, r
 
 
 def blocked_reason(report):
-    """A short, honest reason for a management pass that changed nothing."""
-    history = report.get("history") or {}
-    if history.get("reason"):
-        return history["reason"]
+    """A short, honest reason for a tool-result pass that changed nothing."""
     skips = report["counters"]["skipped_reasons"]
     if skips:
         # Most frequent first, ties broken by the text, so the line is stable.
         text, count = min(skips.items(), key=lambda item: (-item[1], item[0]))
         return f"{count} item(s) skipped: {text}"
-    return "no eligible item was left to reduce"
+    return "no eligible tool result was left to reduce"
 
+def manage_tool_results(client, model, messages, history_count, over_trigger, report=None, management_usage=None):
+    """Reduce this turn's older tool results after the provider called the request large.
 
-def manage_context(
+    Runs before a model request. The only signal is `over_trigger`: whether the
+    provider's actual input usage for the previous response was at or above the
+    compaction trigger. Nothing is measured locally, so this pass never decides from a
+    size estimate. It walks the request in priority order and reduces the older-round
+    results one by one - never the newest round (the model has not read it yet) and
+    never an unmatched or already-managed result. A critical result is trimmed
+    deterministically and a normal one is summarised, each at most once.
+
+    When `over_trigger` is false the pass does nothing at all, so an ordinary turn pays
+    for nothing. Returns {messages, history_count, report, changed}; `messages` is a
+    new list only when something was replaced.
+    """
+    tool_settings = tool_result_manager.read_tool_result_settings()
+    priority_enabled = read_truthy_env(ENV_CONTEXT_PRIORITY_ENABLED, DEFAULT_CONTEXT_PRIORITY_ENABLED)
+
+    if report is None:
+        report = empty_management_report(tool_settings, priority_enabled)
+
+    result = {
+        "messages": messages,
+        "history_count": history_count,
+        "report": report,
+        "changed": False,
+    }
+    if not tool_settings["enabled"] or not over_trigger:
+        # Management is off, or the provider did not report a large request: no pass.
+        return result
+
+    report["passes"] += 1
+    working = list(messages)
+    _, info_by_index = tool_result_manager.collect_tool_results(working)
+    ranked = context_priority.rank_context_items(
+        working, history_count, info_by_index, newest_user_text(working), priority_enabled
+    )
+    store_instance = tool_result_manager.store(tool_settings["store_max_bytes"])
+    changed = False
+
+    for candidate in ranked:
+        if candidate["kind"] not in ("tool_older", "tool_recent"):
+            continue
+        info = info_by_index.get(candidate["index"])
+        if not info or info.get("managed") or not info.get("matched"):
+            continue
+        if info.get("newest_round"):
+            # The model has not read this round yet, so it stays verbatim.
+            continue
+
+        outcome = tool_result_manager.manage_result(
+            client, model, working, info, tool_settings, store_instance, usage_out=management_usage
+        )
+        if outcome["management_request"]:
+            report["counters"]["management_calls"] += 1
+        if outcome["status"] == "managed":
+            report["counters"]["managed_this_turn"] += 1
+            report["counters"]["summarized" if outcome["mode"] == "summarized" else "trimmed"] += 1
+            changed = True
+            continue
+        if outcome["status"] == "failed":
+            report["counters"]["management_failures"] += 1
+        remember_skip(report["counters"], outcome["reason"])
+
+    report["changed_passes" if changed else "blocked_passes"] += 1
+    report["tool_results"] = tool_results_report(
+        working, tool_settings, report, history_count, newest_user_text(working), priority_enabled
+    )
+    result.update(messages=working, history_count=history_count, changed=changed)
+
+    print(
+        f"[tool-results] pass {report['passes']} (provider input was over the trigger): "
+        f"{report['tool_results']['managed_this_turn']} result(s) managed this turn"
+        + ("" if changed else f"; nothing could be reduced ({blocked_reason(report)})"),
+        flush=True,
+    )
+    return result
+
+def compact_after_response(
     client,
     model,
     messages,
     history_count,
     stored,
-    budget=None,
-    tool_schemas=None,
+    actual_usage,
     report=None,
+    management_usage=None,
 ):
-    """Adaptive context management, run before every model request.
+    """Decide and run conversation compaction after one provider response.
 
-    It estimates the prepared request first and does nothing at all while that
-    estimate is inside the compaction trigger, so an ordinary turn never pays for a
-    management request. Above the trigger it reduces in this order:
+    The provider's actual input token count is the only decision source. When it is
+    missing or unusable the conversation is kept exactly as it is and the reason is
+    recorded: a local estimate is never substituted, because a response that reported
+    no usage cannot drive a usage-triggered decision. When the actual input is at or
+    above the trigger, the oldest saved messages are folded into the stored summary and
+    the compacted messages/history_count are returned for the next request.
 
-    1. older saved conversation messages, folded into the stored summary by
-       compact_request() - a pass never re-summarises content an earlier pass already
-       covered, and the stored conversation is never rewritten;
-    2. the least important eligible tool results, replaced by their managed
-       representations: least important first, so newest-round and relevant results
-       are reduced last, and a result that is already managed is never touched again.
-
-    It stops as soon as the estimate reaches the target. The system prompt, the
-    newest user message and this turn's message structure are never touched, so the
-    request that is left over is judged by enforce_context_budget() exactly as
-    before - including the 413 behaviour when it still cannot fit.
-
-    Returns {messages, history_count, compaction, report, changed, estimate_before,
-    estimate_after}. `messages` is a new list: the caller's list is never edited in
-    place. Pass the returned `report` back in on the next pass of the same turn to
-    keep the turn's counters.
+    Returns {messages, history_count, compaction, changed, trigger_exceeded};
+    `compaction` is set only when the stored summary changed, the turn's report gains a
+    `history` entry describing the decision either way, and `trigger_exceeded` tells the
+    caller whether this response's usage was at or above the trigger (so the next
+    request can decide about tool results from the same fact).
     """
-    budget = budget or context_budget_settings()
-    compaction_settings = read_compaction_settings(budget)
-    tool_settings = tool_result_manager.read_tool_result_settings(budget)
-    adaptive = read_truthy_env(ENV_ADAPTIVE_COMPACTION_ENABLED, DEFAULT_ADAPTIVE_COMPACTION_ENABLED)
-    priority_enabled = read_truthy_env(ENV_CONTEXT_PRIORITY_ENABLED, DEFAULT_CONTEXT_PRIORITY_ENABLED)
-
-    if report is None:
-        report = empty_management_report(compaction_settings, tool_settings, priority_enabled)
-
-    before = int(
-        estimate_context(messages, tool_schemas, history_count, model).get("estimated_input_tokens") or 0
-    )
-    if report["estimate_before"] is None:
-        report["estimate_before"] = before
+    settings = read_compaction_settings()
+    actual_input = actual_input_tokens(actual_usage)
 
     result = {
         "messages": messages,
         "history_count": history_count,
         "compaction": None,
-        "report": report,
         "changed": False,
-        "estimate_before": before,
-        "estimate_after": before,
+        "trigger_exceeded": False,
     }
-
-    if not adaptive or before < compaction_settings["trigger_tokens"]:
-        # Inside the trigger: no summary request, no management pass, no change.
+    if report is None:
         return result
 
-    report["passes"] += 1
-    counter = load_tokenizer(model)["counter"]
-    request_text = newest_user_text(messages)
-    working = list(messages)
-    changed = False
+    # Every completed response is evaluated, so the analytics can show the actual
+    # usage that was compared with the trigger, not only the turns that compacted.
+    evaluation = {
+        "post_response": True,
+        "attempted": False,
+        "applied": False,
+        "reused": False,
+        "reason": None,
+        "compacted_messages": 0,
+        "trigger_tokens": settings["trigger_tokens"],
+        "actual_input_tokens": actual_input,
+        "usage_available": actual_input is not None,
+        "trigger_exceeded": bool(
+            actual_input is not None and actual_input >= settings["trigger_tokens"]
+        ),
+        "summary_requests": 0,
+    }
+    result["trigger_exceeded"] = evaluation["trigger_exceeded"]
 
-    # 1. Older saved conversation messages first; the recent ones stay verbatim.
+    if not settings["enabled"]:
+        evaluation["reason"] = "conversation compaction is switched off by configuration"
+        report["history"] = merge_history_report(report.get("history"), evaluation)
+        return result
+
+    if actual_input is None:
+        # A response without usable usage cannot drive the decision, so no estimate is
+        # substituted and the conversation is preserved exactly as it is.
+        evaluation["reason"] = (
+            "the provider reported no usable input token usage for the last response, so no "
+            "post-response compaction decision could be made and the conversation was kept"
+        )
+        print("[compaction] skipped: the provider reported no usable input usage", flush=True)
+        report["history"] = merge_history_report(report.get("history"), evaluation)
+        return result
+
+    if actual_input < settings["trigger_tokens"]:
+        evaluation["reason"] = (
+            f"the provider's actual input was {actual_input} tokens, below the compaction "
+            f"trigger of {settings['trigger_tokens']}, so nothing was compacted"
+        )
+        report["history"] = merge_history_report(report.get("history"), evaluation)
+        return result
+
+    # At or above the trigger: fold the oldest saved messages into the summary. The
+    # summary request is a separate, tool-free call and is never itself compacted.
+    evaluation["attempted"] = True
     folded = compact_request(
-        client, model, working, history_count, stored, budget=budget, tool_schemas=tool_schemas
+        client,
+        model,
+        messages,
+        history_count,
+        stored,
+        actual_input,
+        evaluation,
+        management_usage=management_usage,
     )
-    if folded["attempted"]:
-        report["history"] = merge_history_report(report["history"], folded)
+    report["history"] = merge_history_report(report.get("history"), folded)
+
     if folded["applied"] or folded["reused"]:
-        working = folded["messages"]
-        history_count = folded["history_count"]
-        changed = True
+        result["messages"] = folded["messages"]
+        result["history_count"] = folded["history_count"]
+        result["changed"] = True
     if folded["compaction"]:
         result["compaction"] = folded["compaction"]
-
-    current = int(
-        estimate_context(working, tool_schemas, history_count, model).get("estimated_input_tokens") or 0
-    )
-
-    # 2. Tool results next: least important first, until the request meets the target.
-    if tool_settings["enabled"] and current > compaction_settings["target_tokens"]:
-        _, info_by_index = tool_result_manager.collect_tool_results(working, counter, tool_settings)
-        ranked = context_priority.rank_context_items(
-            working, history_count, info_by_index, request_text, priority_enabled
-        )
-        store_instance = tool_result_manager.store(tool_settings["store_max_bytes"])
-
-        for candidate in ranked:
-            if current <= compaction_settings["target_tokens"]:
-                break
-            if candidate["kind"] not in ("tool_older", "tool_recent"):
-                continue
-            info = info_by_index.get(candidate["index"])
-            if not info or info.get("managed") or not info.get("matched"):
-                continue
-
-            outcome = tool_result_manager.manage_result(
-                client, model, working, info, counter, tool_settings, store_instance
-            )
-            if outcome["management_request"]:
-                report["counters"]["management_calls"] += 1
-            if outcome["status"] == "managed":
-                report["counters"]["managed_this_turn"] += 1
-                report["counters"]["summarized" if outcome["mode"] == "summarized" else "trimmed"] += 1
-                current -= int(outcome["saved_tokens"] or 0)
-                changed = True
-                continue
-            if outcome["status"] == "failed":
-                report["counters"]["management_failures"] += 1
-            remember_skip(report["counters"], outcome["reason"])
-
-    after = int(
-        estimate_context(working, tool_schemas, history_count, model).get("estimated_input_tokens") or 0
-    )
-    if changed and after < before:
-        report["changed_passes"] += 1
-    else:
-        report["blocked_passes"] += 1
-
-    report["estimate_after"] = after
-    report["tool_results"] = tool_results_report(
-        working, counter, tool_settings, report, history_count, request_text, priority_enabled
-    )
-    result.update(messages=working, history_count=history_count, changed=changed, estimate_after=after)
-
-    if changed and after < before:
-        print(
-            f"[context] pass {report['passes']}: estimated input {before} -> {after} tokens "
-            f"(trigger {compaction_settings['trigger_tokens']}, "
-            f"target {compaction_settings['target_tokens']}); "
-            f"tool results managed this turn: {report['tool_results']['managed_this_turn']}, "
-            f"saved {report['tool_results']['saved_tokens']} tokens in total",
-            flush=True,
-        )
-    else:
-        print(
-            f"[context] pass {report['passes']}: nothing more could be reduced, "
-            f"{current} tokens still estimated ({blocked_reason(report)})",
-            flush=True,
-        )
     return result
+

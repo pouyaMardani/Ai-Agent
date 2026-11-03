@@ -1650,6 +1650,10 @@ html[data-sidebar="collapsed"] .conv.is-active .conv__main::before {
   color: var(--danger);
 }
 
+.context-toggle__state--muted {
+  color: var(--text-3);
+}
+
 .context-toggle__chevron {
   display: inline-grid;
   place-items: center;
