@@ -1,9 +1,3 @@
-# Core runtime: the FastAPI service, the OpenAI-compatible client and settings.
-fastapi==0.150.0
-openai==3.35.1
-pydantic==2.14.1
-uvicorn==0.54.0
-
-# Token estimation and its tokenizer were removed: the agent runtime does no local
-# token counting, and the provider's reported usage is the only token measurement.
-# See docs/CONTEXT_BUDGET.md.
+fastapi==0.115.0
+openai==1.40.0
+uvicorn==0.30.6
