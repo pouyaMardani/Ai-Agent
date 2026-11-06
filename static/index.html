@@ -101,10 +101,21 @@
 
           <aside class="insights-panel" id="insights-panel" aria-label="Selected message analytics" aria-hidden="true">
             <div class="insights-panel__header">
-              <div><span class="eyebrow" id="insights-eyebrow">MESSAGE ANALYTICS</span><h2 id="insights-title">Analyze a message</h2></div>
-              <button class="icon-button insights-close" id="close-analytics" type="button" aria-label="Close analytics">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg>
-              </button>
+              <div class="insights-panel__heading">
+                <div class="insights-panel__title">
+                  <span class="eyebrow" id="insights-eyebrow">MESSAGE ANALYTICS</span>
+                  <h2 id="insights-title">Analyze a message</h2>
+                </div>
+                <div class="insights-panel__actions">
+                  <button class="insights-copy" id="copy-analytics" type="button" aria-label="Copy Analysis">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h2" /></svg>
+                    <span>Copy Analysis</span>
+                  </button>
+                  <button class="icon-button insights-close" id="close-analytics" type="button" aria-label="Close analytics">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg>
+                  </button>
+                </div>
+              </div>
             </div>
             <div id="conversation-insights" class="insights-content"></div>
           </aside>

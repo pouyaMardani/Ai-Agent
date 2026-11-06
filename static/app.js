@@ -40,6 +40,7 @@ const elements = {
   insightsContent: document.getElementById("conversation-insights"),
   insightsEyebrow: document.getElementById("insights-eyebrow"),
   insightsTitle: document.getElementById("insights-title"),
+  copyAnalytics: document.getElementById("copy-analytics"),
   themeName: document.getElementById("current-theme-name"),
   themeDialog: document.getElementById("theme-dialog"),
   themeGrid: document.getElementById("theme-grid"),
@@ -516,10 +517,6 @@ function getUsageValue(usage, name, alternateName) {
   return null;
 }
 
-function displayUsageValue(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "N/A";
-}
-
 function insightRow(label, value) {
   const row = document.createElement("div");
   row.className = "insight-row";
@@ -528,7 +525,8 @@ function insightRow(label, value) {
   labelEl.textContent = label;
   const valueEl = document.createElement("span");
   valueEl.className = "insight-row__value";
-  if (value === null || value === undefined || value === "") {
+  if (value === null || value === undefined || value === "" ||
+      (typeof value === "number" && !Number.isFinite(value))) {
     valueEl.classList.add("is-unavailable");
     valueEl.textContent = UNAVAILABLE;
   } else {
@@ -566,9 +564,31 @@ function insightCard(icon, title, ...children) {
 function getSelectedMessageContext(conversation, message) {
   if (message.role === "assistant") return message;
   const linkedResponses = conversation.messages.filter(
-    (item) => item.role === "assistant" && item.requestUserId === message.id,
+    (item) => item.role === "assistant" &&
+      (item.requestUserId === message.id || (!item.requestUserId && item.retryUserId === message.id)),
   );
   return linkedResponses.length === 1 ? linkedResponses[0] : null;
+}
+
+function getCompactionOccurred(compaction, requestMessage) {
+  if (typeof compaction?.occurred === "boolean") return compaction.occurred;
+  if (compaction?.summary) return true;
+  return requestMessage && !requestMessage.isError ? false : null;
+}
+
+function getCompactionReduction(compaction) {
+  const before = compaction?.before_input_tokens ?? compaction?.triggered_input_tokens;
+  const after = compaction?.after_input_tokens;
+  if (typeof before !== "number" || !Number.isFinite(before) ||
+      typeof after !== "number" || !Number.isFinite(after)) {
+    return null;
+  }
+  return before - after;
+}
+
+function getToolCallNames(toolCalls) {
+  return toolCalls.map((call) => (typeof call === "string" ? call : call?.name))
+    .filter((name) => typeof name === "string" && name);
 }
 
 function renderInsights() {
@@ -611,40 +631,191 @@ function renderInsights() {
 
   const compactionCard = insightCard(ICONS.compaction, "Compaction");
   const compaction = requestMessage?.compaction;
+  const compactionOccurred = getCompactionOccurred(compaction, requestMessage);
   compactionCard.append(
     insightRow("Configured trigger threshold", compaction?.trigger_threshold ?? null),
-    insightRow("Configured target threshold", compaction?.target_threshold ?? null),
-    insightRow("Compaction", requestMessage ? (compaction ? "Occurred" : "No compaction") : null),
+    insightRow(
+      "Compaction",
+      compactionOccurred === null ? null : (compactionOccurred ? "Occurred" : "No compaction"),
+    ),
   );
-  if (compaction) {
-    const beforeTokens = compaction.triggered_input_tokens;
-    const afterTokens = compaction.after_input_tokens ?? compaction.after_tokens;
+  if (compactionOccurred) {
+    const beforeTokens = compaction.before_input_tokens ?? compaction.triggered_input_tokens;
+    const afterTokens = compaction.after_input_tokens;
     compactionCard.append(
       insightRow(
-        "Actual tokens · Before → After",
-        `${displayUsageValue(beforeTokens)} → ${displayUsageValue(afterTokens)}`,
+        "Provider-reported input tokens",
+        `Before: ${analyticsTextValue(beforeTokens)} → After: ${analyticsTextValue(afterTokens)}`,
       ),
     );
+    if (afterTokens === null || afterTokens === undefined) {
+      compactionCard.appendChild(
+        insightNote("This compaction flow does not measure post-compaction context size."),
+      );
+    }
+    const reduction = getCompactionReduction(compaction);
+    if (reduction !== null) {
+      compactionCard.appendChild(insightRow("Actual token reduction", reduction));
+    }
+
+    const summaryUsage = compaction.summary_usage;
+    if (summaryUsage) {
+      const summaryValues = [
+        ["Summary input tokens", getUsageValue(summaryUsage, "input_tokens", "prompt_tokens")],
+        ["Summary output tokens", getUsageValue(summaryUsage, "output_tokens", "completion_tokens")],
+        ["Summary total tokens", getUsageValue(summaryUsage, "total_tokens")],
+        ["Summary cached input tokens", getUsageValue(summaryUsage, "cached_tokens", "cached_input_tokens")],
+        ["Summary reasoning tokens", getUsageValue(summaryUsage, "reasoning_tokens")],
+      ];
+      const availableSummaryValues = summaryValues.filter(([, value]) => value !== null && value !== undefined);
+      if (availableSummaryValues.length) {
+        compactionCard.appendChild(insightNote("Summary generation provider usage"));
+        for (const [label, value] of availableSummaryValues) {
+          compactionCard.appendChild(insightRow(label, value));
+        }
+      }
+    }
   }
   elements.insightsContent.appendChild(compactionCard);
 
   const toolsCard = insightCard(ICONS.tools, "Tool Calls");
   const toolCalls = requestMessage?.toolCalls;
   if (Array.isArray(toolCalls)) {
-    toolsCard.appendChild(insightRow("Tool Calls", toolCalls.length));
-    for (const call of toolCalls) {
-      const name = typeof call === "string" ? call : call?.name;
-      if (typeof name === "string" && name) {
-        const toolName = document.createElement("div");
-        toolName.className = "insight-tool-name";
-        toolName.textContent = name;
-        toolsCard.appendChild(toolName);
-      }
+    toolsCard.appendChild(insightRow("Total executed calls", toolCalls.length));
+    const toolNames = getToolCallNames(toolCalls);
+    if (!toolNames.length) {
+      toolsCard.appendChild(insightNote("No tools executed."));
+    }
+    for (const name of toolNames) {
+      const toolName = document.createElement("div");
+      toolName.className = "insight-tool-name";
+      toolName.textContent = name;
+      toolsCard.appendChild(toolName);
     }
   } else {
-    toolsCard.appendChild(insightRow("Tool Calls", null));
+    toolsCard.appendChild(insightRow("Total executed calls", null));
   }
   elements.insightsContent.appendChild(toolsCard);
+}
+
+function analyticsTextValue(value) {
+  if (value === null || value === undefined || value === "" ||
+      (typeof value === "number" && !Number.isFinite(value))) {
+    return UNAVAILABLE;
+  }
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : String(value);
+}
+
+function buildAnalyticsText(conversation, selectedMessage) {
+  const requestMessage = getSelectedMessageContext(conversation, selectedMessage);
+  const usage = requestMessage?.usage;
+  const compaction = requestMessage?.compaction;
+  const compactionOccurred = getCompactionOccurred(compaction, requestMessage);
+  const toolCalls = requestMessage?.toolCalls;
+  const lines = [
+    "Request Analytics",
+    `Model: ${analyticsTextValue(requestMessage?.model)}`,
+    "",
+    "Provider-reported token usage",
+    `Input tokens: ${analyticsTextValue(getUsageValue(usage, "input_tokens", "prompt_tokens"))}`,
+    `Output tokens: ${analyticsTextValue(getUsageValue(usage, "output_tokens", "completion_tokens"))}`,
+    `Total tokens: ${analyticsTextValue(getUsageValue(usage, "total_tokens"))}`,
+  ];
+  const cachedTokens = getUsageValue(usage, "cached_tokens", "cached_input_tokens");
+  const reasoningTokens = getUsageValue(usage, "reasoning_tokens");
+  if (cachedTokens !== null && cachedTokens !== undefined) {
+    lines.push(`Cached input tokens: ${analyticsTextValue(cachedTokens)}`);
+  }
+  if (reasoningTokens !== null && reasoningTokens !== undefined) {
+    lines.push(`Reasoning tokens: ${analyticsTextValue(reasoningTokens)}`);
+  }
+  lines.push(
+    "",
+    "Compaction",
+    `Configured trigger threshold: ${analyticsTextValue(compaction?.trigger_threshold)}${compaction?.trigger_threshold == null ? "" : " tokens"}`,
+    `Occurred: ${compactionOccurred === null ? UNAVAILABLE : (compactionOccurred ? "Yes" : "No")}`,
+  );
+
+  if (compactionOccurred) {
+    lines.push(
+      `Before (provider-reported input tokens): ${analyticsTextValue(compaction.before_input_tokens ?? compaction.triggered_input_tokens)}`,
+      `After: ${analyticsTextValue(compaction.after_input_tokens)}`,
+    );
+    if (compaction.after_input_tokens === null || compaction.after_input_tokens === undefined) {
+      lines.push("Note: The current compaction flow does not measure post-compaction context size.");
+    }
+    const reduction = getCompactionReduction(compaction);
+    if (reduction !== null) lines.push(`Actual token reduction: ${analyticsTextValue(reduction)}`);
+    const summaryUsage = compaction.summary_usage;
+    if (summaryUsage) {
+      lines.push(
+        "",
+        "Summary generation provider usage",
+        `Input tokens: ${analyticsTextValue(getUsageValue(summaryUsage, "input_tokens", "prompt_tokens"))}`,
+        `Output tokens: ${analyticsTextValue(getUsageValue(summaryUsage, "output_tokens", "completion_tokens"))}`,
+        `Total tokens: ${analyticsTextValue(getUsageValue(summaryUsage, "total_tokens"))}`,
+        `Cached input tokens: ${analyticsTextValue(getUsageValue(summaryUsage, "cached_tokens", "cached_input_tokens"))}`,
+        `Reasoning tokens: ${analyticsTextValue(getUsageValue(summaryUsage, "reasoning_tokens"))}`,
+      );
+    }
+  }
+
+  lines.push("", "Tool calls");
+  if (Array.isArray(toolCalls)) {
+    lines.push(`Total: ${toolCalls.length}`, "Executed tools:");
+    const toolNames = getToolCallNames(toolCalls);
+    lines.push(...(toolNames.length ? toolNames.map((name) => `- ${name}`) : ["- None"]));
+  } else {
+    lines.push(`Total: ${UNAVAILABLE}`, `Executed tools: ${UNAVAILABLE}`);
+  }
+  return lines.join("\n");
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (error) {
+    // Fall through to the legacy copy method.
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.tabIndex = -1;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  try {
+    textarea.focus();
+    textarea.select();
+    return typeof document.execCommand === "function" && document.execCommand("copy");
+  } catch (error) {
+    return false;
+  } finally {
+    textarea.remove();
+  }
+}
+
+async function copySelectedAnalytics() {
+  const conversation = activeConversation();
+  const selectedMessage = selectedAnalytics?.conversationId === conversation.id
+    ? conversation.messages.find((message) => message.id === selectedAnalytics.messageId) || null
+    : null;
+  if (!selectedMessage) {
+    showToast("Choose Analyze on a message before copying analytics.");
+    return;
+  }
+
+  try {
+    const copied = await copyTextToClipboard(buildAnalyticsText(conversation, selectedMessage));
+    showToast(copied ? "Analytics copied to clipboard." : "Could not copy analytics to the clipboard.");
+  } catch (error) {
+    showToast("Could not copy analytics to the clipboard.");
+  }
 }
 
 function selectMessageForAnalysis(message) {
@@ -1110,6 +1281,7 @@ document.getElementById("toggle-analytics").addEventListener("click", () => {
   setAnalyticsOpen(!elements.insights.classList.contains("is-open"));
 });
 document.getElementById("close-analytics").addEventListener("click", closeAnalytics);
+elements.copyAnalytics.addEventListener("click", copySelectedAnalytics);
 elements.mobileScrim.addEventListener("click", () => {
   closeMobileSidebar();
   closeAnalytics();

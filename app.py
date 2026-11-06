@@ -239,6 +239,7 @@ class AIApp:
     def _run_model_loop(self, messages):
         current_messages = list(messages)
         tool_call_count = 0
+        executed_tools = []
 
         for _ in range(MAX_TOOL_LOOPS):
             response = self.client.chat.completions.create(
@@ -253,7 +254,7 @@ class AIApp:
             tool_calls = message.tool_calls or []
 
             if not tool_calls:
-                return response, current_messages
+                return response, executed_tools
 
             if tool_call_count + len(tool_calls) > MAX_TOOL_CALLS:
                 current_messages.append({
@@ -269,12 +270,13 @@ class AIApp:
                     tool_choice="none",
                     temperature=0.7,
                 )
-                return response, current_messages
+                return response, executed_tools
 
             current_messages.append(message.model_dump(exclude_none=True))
 
             for tool_call in tool_calls:
                 tool_result = self._execute_tool(tool_call)
+                executed_tools.append(tool_call.function.name)
                 current_messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -296,27 +298,35 @@ class AIApp:
         messages = self._build_messages(history_list, clean_message, summary)
 
         try:
-            response, messages_with_tools = self._run_model_loop(messages)
+            response, executed_tools = self._run_model_loop(messages)
         except RuntimeError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         reply = response.choices[0].message.content or ""
         usage = self._extract_usage(response)
 
-        compaction_payload = None
+        compaction_payload = {
+            "trigger_threshold": COMPACTION_THRESHOLD,
+            "occurred": False,
+            "before_input_tokens": None,
+            "after_input_tokens": None,
+        }
         if usage and usage["input_tokens"] is not None and usage["input_tokens"] >= COMPACTION_THRESHOLD:
             result = self._make_summary(history_list + [{"role": "user", "content": clean_message}])
-            compaction_payload = {
+            compaction_payload.update({
                 "summary": result["summary"],
+                "occurred": True,
+                "before_input_tokens": usage["input_tokens"],
                 "triggered_input_tokens": usage["input_tokens"],
                 "count": (compaction.get("count") if isinstance(compaction, dict) else 0) + 1,
                 "summary_usage": result["usage"],
-            }
+            })
 
         return {
             "reply": reply,
             "model": self.model,
             "usage": usage,
             "compaction": compaction_payload,
+            "toolCalls": executed_tools,
         }
 
 

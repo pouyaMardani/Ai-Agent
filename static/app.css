@@ -721,9 +721,16 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .insights-panel { display: flex; flex: 0 0 0; width: 0; min-width: 0; flex-direction: column; overflow: hidden; background: color-mix(in srgb, var(--surface) 86%, transparent); border-left: 0 solid var(--border); transition: width 300ms var(--ease), flex-basis 300ms var(--ease), padding 300ms var(--ease), border-width 300ms var(--ease); }
 .insights-panel.is-open { flex-basis: 285px; width: 285px; padding: 21px 17px 17px; border-left-width: 1px; }
-.insights-panel__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 21px; }
+.insights-panel__header { margin-bottom: 21px; }
+.insights-panel__heading, .insights-panel__actions { display: flex; align-items: flex-start; }
+.insights-panel__heading { justify-content: space-between; gap: 6px; }
+.insights-panel__title { min-width: 0; }
+.insights-panel__actions { flex-shrink: 0; align-items: center; gap: 4px; }
 .insights-panel__header h2, .dialog-heading h2 { margin: 5px 0 0; color: var(--text); font-size: 16px; font-weight: 650; letter-spacing: -.55px; }
-.insights-close { width: 30px; height: 30px; margin: -5px -5px 0 0; }
+.insights-close { width: 27px; height: 27px; margin: 0; }
+.insights-copy { display: inline-flex; min-height: 27px; align-items: center; gap: 4px; padding: 0 6px; color: var(--text-soft); background: var(--surface-soft); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 8px; white-space: nowrap; transition: color 150ms ease, border-color 150ms ease, background 150ms ease; }
+.insights-copy:hover { color: var(--accent); background: var(--surface-strong); border-color: var(--accent); }
+.insights-copy svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .insights-content { display: flex; min-height: 0; flex-direction: column; gap: 13px; overflow-y: auto; }
 .insight-model { display: flex; align-items: center; gap: 10px; padding: 11px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 12px; }
 .insight-model__icon { display: grid; width: 30px; height: 30px; place-items: center; color: var(--accent); background: rgba(var(--accent-rgb), .1); border: 1px solid rgba(var(--accent-rgb), .19); border-radius: 9px; }

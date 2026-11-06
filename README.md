@@ -61,7 +61,7 @@ When the provider returns usage data, the app keeps:
 - cached tokens, if available,
 - reasoning tokens, if available.
 
-If a provider value is missing, the UI shows `N/A` instead of guessing a zero.
+If a provider value is missing, the UI shows `Unavailable` instead of guessing a zero.
 
 ## 7. Compaction
 
@@ -72,7 +72,7 @@ After a completed model response, the app checks actual input tokens.
 - The summary is stored with the conversation and reused on the next request.
 - The browser keeps the full conversation locally and continues to send its history through the existing API; the backend applies its existing recent-history limit while also receiving the saved summary.
 
-The compaction logic is intentionally simple and based only on actual provider input usage.
+The compaction logic is intentionally simple and based only on actual provider input usage. When the trigger is reached, the app generates and saves a summary for later requests; it does not measure a post-compaction prompt as part of that request. Analytics records the configured 4000-token trigger, whether compaction occurred, and the provider-reported input tokens before compaction. The post-compaction count and reduction remain unavailable unless the provider reports an actual measurement.
 
 ## 8. Where conversation data is stored
 
@@ -89,4 +89,4 @@ The interface also supports multiple conversations, conversation search, rename 
 
 The page uses the existing `/api/chat` endpoint and does not make extra backend requests for theme, conversation, or analytics interactions. The usage panel shows provider-reported values from completed responses. A missing provider value is displayed as `N/A`.
 
-The interface is responsive: conversation navigation and usage insights open as mobile drawers. Its animated glass-like AI emblem is drawn with CSS, so the project does not need a 3D rendering package.
+The interface is responsive: conversation navigation and usage insights open as mobile drawers. Analytics are stored with the assistant response for the request they describe, include the tools actually executed, and can be copied as structured plain text. Its animated glass-like AI emblem is drawn with CSS, so the project does not need a 3D rendering package.
