@@ -19,6 +19,7 @@ from config import BASE_DIR, create_client, get_settings
 
 SYSTEM_PROMPT = "You are a helpful assistant. Keep answers clear and brief."
 COMPACTION_THRESHOLD = 4000
+MAX_TOOL_CALLS = 10
 try:
     MAX_TOOL_LOOPS = int(os.getenv("MAX_TOOL_LOOPS", "4"))
 except ValueError as error:
@@ -234,10 +235,12 @@ class AIApp:
     
             return {"ok": False, "error": f"Unknown tool: {name}"}
 
+    
     def _run_model_loop(self, messages):
         current_messages = list(messages)
-        seen_tool_calls = set()
-        for iteration in range(1, MAX_TOOL_LOOPS + 1):
+        tool_call_count = 0
+
+        for _ in range(MAX_TOOL_LOOPS):
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=current_messages,
@@ -245,126 +248,43 @@ class AIApp:
                 tool_choice="auto",
                 temperature=0.7,
             )
+
             message = response.choices[0].message
-            tool_calls = list(message.tool_calls or [])
+            tool_calls = message.tool_calls or []
 
             if not tool_calls:
-                current_messages.append(
-                    {"role": "assistant", "content": message.content or ""}
+                return response, current_messages
+
+            if tool_call_count + len(tool_calls) > MAX_TOOL_CALLS:
+                current_messages.append({
+                    "role": "system",
+                    "content": (
+                        "Tool call limit reached. Do not call any more tools. "
+                        "Answer the user using the information already available."
+                    ),
+                })
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=current_messages,
+                    tool_choice="none",
+                    temperature=0.7,
                 )
                 return response, current_messages
 
-            assistant_tool_calls = []
-            call_ids = set()
-            for tool_call in tool_calls:
-                call_id = tool_call.id
-                if not call_id or call_id in call_ids:
-                    LOGGER.error(
-                        "Invalid tool call IDs in iteration %d; rejecting tool-call message.",
-                        iteration,
-                    )
-                    raise RuntimeError(
-                        "The model returned missing or duplicate tool call IDs."
-                    )
-                call_ids.add(call_id)
-                assistant_tool_calls.append(
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments or "{}",
-                        },
-                    }
-                )
-
-            current_messages.append(
-                {
-                    "role": "assistant",
-                    "content": message.content,
-                    "tool_calls": assistant_tool_calls,
-                }
-            )
+            current_messages.append(message.model_dump(exclude_none=True))
 
             for tool_call in tool_calls:
-                tool_name = tool_call.function.name
-                arguments = tool_call.function.arguments or "{}"
-                try:
-                    normalized_arguments = json.dumps(
-                        json.loads(arguments),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                except (TypeError, ValueError):
-                    normalized_arguments = arguments
-                call_signature = (tool_name, normalized_arguments)
+                tool_result = self._execute_tool(tool_call)
+                current_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(tool_result),
+                })
 
-                if call_signature in seen_tool_calls:
-                    LOGGER.warning(
-                        "Tool call skipped: iteration=%d tool=%s status=repeated-identical",
-                        iteration,
-                        tool_name,
-                    )
-                    tool_result = {
-                        "ok": False,
-                        "error": "Repeated identical tool call was not executed.",
-                    }
-                else:
-                    seen_tool_calls.add(call_signature)
-                    try:
-                        tool_result = self._execute_tool(tool_call)
-                        if tool_result is None:
-                            tool_result = {
-                                "ok": False,
-                                "error": f"Unknown tool: {tool_name}",
-                            }
-                        status = (
-                            "failed"
-                            if isinstance(tool_result, dict)
-                            and tool_result.get("ok") is False
-                            else "completed"
-                        )
-                        LOGGER.info(
-                            "Tool call: iteration=%d tool=%s status=%s",
-                            iteration,
-                            tool_name,
-                            status,
-                        )
-                    except Exception as error:
-                        LOGGER.error(
-                            "Tool call: iteration=%d tool=%s status=exception error_type=%s",
-                            iteration,
-                            tool_name,
-                            type(error).__name__,
-                        )
-                        tool_result = {
-                            "ok": False,
-                            "error": "Tool execution failed.",
-                        }
+                tool_call_count += 1
 
-                try:
-                    result_content = json.dumps(tool_result)
-                except (TypeError, ValueError) as error:
-                    LOGGER.error(
-                        "Tool call: iteration=%d tool=%s status=result-serialization-failed error_type=%s",
-                        iteration,
-                        tool_name,
-                        type(error).__name__,
-                    )
-                    result_content = json.dumps(
-                        {"ok": False, "error": "Tool result could not be serialized."}
-                    )
-                current_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": result_content,
-                    }
-                )
+        raise RuntimeError("Tool loop exceeded the safe limit.")
 
-        raise RuntimeError(
-            f"Tool loop exceeded the safe limit of {MAX_TOOL_LOOPS} iterations."
-        )
 
     def handle_chat(self, message, history=None, compaction=None):
         clean_message = (message or "").strip()
