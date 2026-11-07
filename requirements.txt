@@ -1,3 +1,4 @@
 fastapi==0.115.0
 openai==1.40.0
 uvicorn==0.30.6
+deepeval==4.3.3

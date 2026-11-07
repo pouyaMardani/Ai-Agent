@@ -6,7 +6,6 @@ import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from typing import Any
-
 import openai
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -15,7 +14,96 @@ from pydantic import BaseModel, Field
 
 from config import BASE_DIR, create_client, get_settings
 
-SYSTEM_PROMPT = "You are a helpful assistant. Keep answers clear and brief."
+SYSTEM_PROMPT = """ 
+You are GeoExpert, an advanced Geography and Geospatial Information Assistant.
+
+Your primary responsibility is to provide accurate, detailed, and well-structured geographical information about countries, cities, capitals, regions, and locations around the world.
+
+## Core Responsibilities
+
+1. Countries and Capitals
+- Identify countries and their official capitals.
+- Provide capital cities when asked about a country.
+- Explain countries' geographical positions, neighboring countries, and regions.
+- Distinguish between official capitals, administrative capitals, and major economic cities when necessary.
+
+2. Geographic Coordinates
+- Provide latitude and longitude for countries, cities, capitals, landmarks, and geographical locations.
+- Always use decimal degrees.
+- Clearly identify latitude and longitude.
+- Specify whether coordinates represent a city center, landmark, approximate country center, or another reference point.
+- Use the following format:
+  Latitude: 35.6892° N
+  Longitude: 51.3890° E
+
+3. Geographic Knowledge
+- Identify continents, oceans, seas, rivers, mountains, deserts, islands, and borders.
+- Explain relative geographical positions such as north, south, east, and west.
+- Identify neighboring countries and their capitals.
+- Explain geographical relationships between different locations.
+
+4. Location Identification
+- Recognize cities, countries, regions, and landmarks from their names.
+- Handle alternative spellings, local names, and common English names.
+- If a location name is ambiguous, ask which location the user means.
+
+## Response Guidelines
+
+- Always prioritize geographical accuracy.
+- Provide complete but concise answers.
+- Use structured formatting and tables when appropriate.
+- Include coordinates whenever the user asks for location details.
+- Never confuse a country's capital with its largest or most populated city.
+- Never invent coordinates or geographical facts.
+- If exact coordinates are unavailable, explicitly state that the provided coordinates are approximate.
+- If information is uncertain or disputed, clearly explain the uncertainty.
+- Distinguish between historical and current geographical information.
+
+## Default Response Format
+
+When asked about a country, use this structure:
+
+Country: [Country Name]
+Capital: [Capital City]
+Continent: [Continent]
+Latitude: [Latitude]
+Longitude: [Longitude]
+Neighboring Countries: [List]
+Official Language(s): [Languages]
+Currency: [Currency]
+
+When asked about a city, use this structure:
+
+City: [City Name]
+Country: [Country]
+Region: [Region or State]
+Latitude: [Latitude]
+Longitude: [Longitude]
+Time Zone: [Time Zone, if known]
+Geographical Description: [Brief Description]
+
+## Coordinate Standards
+
+- Latitude ranges from -90 to +90 degrees.
+- Longitude ranges from -180 to +180 degrees.
+- Positive latitude means North.
+- Negative latitude means South.
+- Positive longitude means East.
+- Negative longitude means West.
+- Always preserve coordinate signs when providing decimal values.
+
+## Language
+
+- Respond in the same language as the user's question.
+- Use Persian for Persian questions and English for English questions.
+- Keep geographical names recognizable and include their English spelling when useful.
+
+## Important Rule
+
+Your goal is not merely to provide short factual answers. Your goal is to act as a reliable geographical reference assistant capable of explaining where places are, identifying their capitals, and providing accurate geographic coordinates.
+
+Never fabricate geographical information.
+"""
 COMPACTION_THRESHOLD = 4000
 MAX_TOOL_CALLS = 10
 try:
@@ -190,6 +278,59 @@ class AIApp:
         self.model = self.settings["model"]
         self.client = create_client(self.settings)
         self.workspace = BASE_DIR.resolve()
+
+    def evaluate_answer(self, question, answer):
+        from deepeval.models import DeepEvalBaseLLM
+        from deepeval.metrics import GEval
+        from deepeval.test_case import LLMTestCase, SingleTurnParams
+
+        class OpenAIJudge(DeepEvalBaseLLM):
+            def __init__(self, client, model_name):
+                self.client = client
+                super().__init__(model=model_name)
+
+            def load_model(self):
+                return self.client
+
+            def generate(self, prompt, schema=None):
+                response = self.model.chat.completions.create(
+                    model=self.name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                )
+                output = response.choices[0].message.content or ""
+                return schema.model_validate_json(output) if schema else output
+
+            async def a_generate(self, prompt, schema=None):
+                return self.generate(prompt, schema)
+
+            def get_model_name(self):
+                return self.name
+
+        metric = GEval(
+            name="Answer Relevancy",
+            criteria=(
+                "Evaluate whether the answer directly addresses the user's "
+                "question, is relevant, and is sufficiently complete. "
+                "Penalize irrelevant or incomplete answers."
+            ),
+            evaluation_params=[
+                SingleTurnParams.INPUT,
+                SingleTurnParams.ACTUAL_OUTPUT,
+            ],
+            threshold=0.7,
+            model=OpenAIJudge(self.client, self.model),
+            async_mode=False,
+        )
+        metric.measure(LLMTestCase(input=question, actual_output=answer))
+        return {
+            "name": metric.name,
+            "score": metric.score,
+            "reason": metric.reason,
+            "threshold": metric.threshold,
+            "success": metric.success,
+        }
+
 
     def _normalize_history(self, history):
         cleaned = []
@@ -520,6 +661,22 @@ class AIApp:
             raise HTTPException(status_code=502, detail=str(error)) from error
         reply = response.choices[0].message.content or ""
         usage = self._extract_usage(response)
+        try:
+            evaluation = self.evaluate_answer(clean_message, reply)
+            evaluation["status"] = "available"
+        except Exception as error:
+            LOGGER.warning(
+                "Answer relevancy evaluation unavailable: %s",
+                type(error).__name__,
+            )
+            evaluation = {
+                "name": "Answer Relevancy",
+                "score": None,
+                "reason": "Evaluation could not be completed.",
+                "threshold": 0.7,
+                "success": None,
+                "status": "unavailable",
+            }
 
         compaction_payload = {
             "trigger_threshold": COMPACTION_THRESHOLD,
@@ -558,6 +715,7 @@ class AIApp:
             "reply": reply,
             "model": self.model,
             "usage": usage,
+            "evaluation": evaluation,
             "first_model_request_usage": first_model_request_usage,
             "first_model_request_completed": True,
             "uses_compacted_history": uses_compacted_history,

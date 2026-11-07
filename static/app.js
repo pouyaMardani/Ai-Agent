@@ -90,6 +90,7 @@ function normalizeMessage(raw) {
     content: typeof raw.content === "string" ? raw.content : String(raw.content || ""),
     createdAt: raw.createdAt || raw.timestamp || Date.now(),
     usage: raw.usage || null,
+    evaluation: raw.evaluation || null,
     compaction: raw.compaction || null,
     retryUserId: raw.retryUserId || null,
     requestUserId: raw.requestUserId || null,
@@ -680,6 +681,30 @@ function renderInsights() {
     toolsCard.appendChild(insightRow("Total executed calls", null));
   }
   elements.insightsContent.appendChild(toolsCard);
+
+  const evaluation = requestMessage?.evaluation;
+  const evaluationCard = insightCard(ICONS.context, "Evaluation");
+  const evaluationAvailable = evaluation?.status !== "unavailable" &&
+    typeof evaluation?.score === "number" && Number.isFinite(evaluation.score);
+  const evaluationStatus = !evaluationAvailable
+    ? "Unavailable"
+    : evaluation.success ? "Passed" : "Failed";
+  evaluationCard.append(
+    insightRow("Metric", evaluation?.name || "Answer Relevancy"),
+    insightRow(
+      "Score",
+      evaluationAvailable ? `${evaluation.score.toFixed(2)} / 1.00` : null,
+    ),
+    insightRow(
+      "Threshold",
+      typeof evaluation?.threshold === "number" ? evaluation.threshold.toFixed(2) : null,
+    ),
+    insightRow("Status", evaluationStatus),
+  );
+  if (evaluation?.reason) {
+    evaluationCard.appendChild(insightNote(evaluation.reason));
+  }
+  elements.insightsContent.appendChild(evaluationCard);
 }
 
 function analyticsTextValue(value) {
@@ -694,6 +719,12 @@ function buildAnalyticsText(conversation, selectedMessage) {
   const compaction = requestMessage?.compaction;
   const compactionOccurred = getCompactionOccurred(compaction, requestMessage);
   const toolCalls = requestMessage?.toolCalls;
+  const evaluation = requestMessage?.evaluation;
+  const evaluationAvailable = evaluation?.status !== "unavailable" &&
+    typeof evaluation?.score === "number" && Number.isFinite(evaluation.score);
+  const evaluationStatus = !evaluationAvailable
+    ? "Unavailable"
+    : evaluation.success ? "Passed" : "Failed";
   const lines = [
     "Request Analytics",
     `Model: ${analyticsTextValue(requestMessage?.model)}`,
@@ -746,6 +777,16 @@ function buildAnalyticsText(conversation, selectedMessage) {
   } else {
     lines.push(`Total: ${UNAVAILABLE}`, `Executed tools: ${UNAVAILABLE}`);
   }
+
+  lines.push(
+    "",
+    "Evaluation",
+    `Metric: ${analyticsTextValue(evaluation?.name || "Answer Relevancy")}`,
+    `Score: ${evaluationAvailable ? `${evaluation.score.toFixed(2)} / 1.00` : UNAVAILABLE}`,
+    `Threshold: ${typeof evaluation?.threshold === "number" ? evaluation.threshold.toFixed(2) : UNAVAILABLE}`,
+    `Status: ${evaluationStatus}`,
+    `Reason: ${analyticsTextValue(evaluation?.reason)}`,
+  );
   return lines.join("\n");
 }
 
@@ -1113,6 +1154,7 @@ async function requestReply(conversation, userMessage, history) {
       retryUserId: userMessage.id,
       requestUserId: userMessage.id,
       usage: data.usage || null,
+      evaluation: data.evaluation || null,
       compaction,
       model: data.model || null,
       toolCalls: Array.isArray(data.toolCalls) ? data.toolCalls : null,
