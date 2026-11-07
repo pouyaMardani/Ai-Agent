@@ -61,7 +61,7 @@ function createConversation() {
     messages: [],
     summary: "",
     compactionCount: 0,
-    lastCompactionInputTokens: null,
+    pendingCompactionAfter: null,
   };
 }
 
@@ -117,8 +117,8 @@ function normalizeConversation(raw) {
     messages,
     summary: typeof raw.summary === "string" ? raw.summary : (oldCompaction.summary || ""),
     compactionCount: Number(raw.compactionCount ?? oldCompaction.count) || 0,
-    lastCompactionInputTokens:
-      raw.lastCompactionInputTokens ?? oldCompaction.triggered_input_tokens ?? null,
+    pendingCompactionAfter:
+      typeof raw.pendingCompactionAfter === "string" ? raw.pendingCompactionAfter : null,
   };
 }
 
@@ -528,15 +528,14 @@ function insightRow(label, value) {
   labelEl.textContent = label;
   const valueEl = document.createElement("span");
   valueEl.className = "insight-row__value";
-  if (value === null || value === undefined || value === "" ||
-      (typeof value === "number" && !Number.isFinite(value))) {
+  const unavailable = value == null || value === "" ||
+    (typeof value === "number" && !Number.isFinite(value));
+  if (unavailable) {
     valueEl.classList.add("is-unavailable");
-    valueEl.textContent = UNAVAILABLE;
-  } else {
-    valueEl.textContent = typeof value === "number" && Number.isFinite(value)
-      ? value.toLocaleString()
-      : String(value);
   }
+  valueEl.textContent = unavailable
+    ? UNAVAILABLE
+    : typeof value === "number" ? value.toLocaleString() : String(value);
   row.append(labelEl, valueEl);
   return row;
 }
@@ -577,16 +576,6 @@ function getCompactionOccurred(compaction, requestMessage) {
   if (typeof compaction?.occurred === "boolean") return compaction.occurred;
   if (compaction?.summary) return true;
   return requestMessage && !requestMessage.isError ? false : null;
-}
-
-function getCompactionReduction(compaction) {
-  const before = compaction?.before_input_tokens ?? compaction?.triggered_input_tokens;
-  const after = compaction?.after_input_tokens;
-  if (typeof before !== "number" || !Number.isFinite(before) ||
-      typeof after !== "number" || !Number.isFinite(after)) {
-    return null;
-  }
-  return before - after;
 }
 
 function getToolCallNames(toolCalls) {
@@ -636,7 +625,7 @@ function renderInsights() {
   const compaction = requestMessage?.compaction;
   const compactionOccurred = getCompactionOccurred(compaction, requestMessage);
   compactionCard.append(
-    insightRow("Configured trigger threshold", compaction?.trigger_threshold ?? null),
+    insightRow("Trigger threshold", compaction?.trigger_threshold ?? null),
     insightRow(
       "Compaction",
       compactionOccurred === null ? null : (compactionOccurred ? "Occurred" : "No compaction"),
@@ -646,20 +635,12 @@ function renderInsights() {
     const beforeTokens = compaction.before_input_tokens ?? compaction.triggered_input_tokens;
     const afterTokens = compaction.after_input_tokens;
     compactionCard.append(
-      insightRow(
-        "Provider-reported input tokens",
-        `Before: ${analyticsTextValue(beforeTokens)} → After: ${analyticsTextValue(afterTokens)}`,
+      insightRow("Before", beforeTokens),
+      insightRow("After", afterTokens),
+      insightNote(
+        "Before is the triggering request. After is the first subsequent model request using compacted history. Both are provider-reported input tokens for complete requests, including system instructions and other content; After is not the summary's token count.",
       ),
     );
-    if (afterTokens === null || afterTokens === undefined) {
-      compactionCard.appendChild(
-        insightNote("This compaction flow does not measure post-compaction context size."),
-      );
-    }
-    const reduction = getCompactionReduction(compaction);
-    if (reduction !== null) {
-      compactionCard.appendChild(insightRow("Actual token reduction", reduction));
-    }
 
     const summaryUsage = compaction.summary_usage;
     if (summaryUsage) {
@@ -702,11 +683,9 @@ function renderInsights() {
 }
 
 function analyticsTextValue(value) {
-  if (value === null || value === undefined || value === "" ||
-      (typeof value === "number" && !Number.isFinite(value))) {
-    return UNAVAILABLE;
-  }
-  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : String(value);
+  if (value == null || value === "" ||
+      (typeof value === "number" && !Number.isFinite(value))) return UNAVAILABLE;
+  return typeof value === "number" ? value.toLocaleString() : String(value);
 }
 
 function buildAnalyticsText(conversation, selectedMessage) {
@@ -735,20 +714,16 @@ function buildAnalyticsText(conversation, selectedMessage) {
   lines.push(
     "",
     "Compaction",
-    `Configured trigger threshold: ${analyticsTextValue(compaction?.trigger_threshold)}${compaction?.trigger_threshold == null ? "" : " tokens"}`,
+    `Trigger threshold: ${analyticsTextValue(compaction?.trigger_threshold)}${compaction?.trigger_threshold == null ? "" : " tokens"}`,
     `Occurred: ${compactionOccurred === null ? UNAVAILABLE : (compactionOccurred ? "Yes" : "No")}`,
   );
 
   if (compactionOccurred) {
     lines.push(
-      `Before (provider-reported input tokens): ${analyticsTextValue(compaction.before_input_tokens ?? compaction.triggered_input_tokens)}`,
-      `After: ${analyticsTextValue(compaction.after_input_tokens)}`,
+      `Before (provider-reported input tokens for triggering request): ${analyticsTextValue(compaction.before_input_tokens ?? compaction.triggered_input_tokens)}`,
+      `After (provider-reported input tokens for first request using compacted history): ${analyticsTextValue(compaction.after_input_tokens)}`,
+      "These values describe complete model requests, including system instructions and other request content; After is not the token count of the summary alone.",
     );
-    if (compaction.after_input_tokens === null || compaction.after_input_tokens === undefined) {
-      lines.push("Note: The current compaction flow does not measure post-compaction context size.");
-    }
-    const reduction = getCompactionReduction(compaction);
-    if (reduction !== null) lines.push(`Actual token reduction: ${analyticsTextValue(reduction)}`);
     const summaryUsage = compaction.summary_usage;
     if (summaryUsage) {
       lines.push(
@@ -1064,15 +1039,42 @@ function formatProviderError(details) {
   return lines.join("\n");
 }
 
+function recordCompactionAfter(conversation, compactionMessageId, requestUserId, usage) {
+  if (!compactionMessageId) return;
+  const eventMessage = conversation.messages.find(
+    (message) => message.id === compactionMessageId && message.role === "assistant",
+  );
+  if (!eventMessage?.compaction) return;
+
+  const inputTokens = usage?.input_tokens;
+  eventMessage.compaction.after_input_tokens =
+    typeof inputTokens === "number" && Number.isFinite(inputTokens) ? inputTokens : null;
+  eventMessage.compaction.after_request_user_id = requestUserId;
+  eventMessage.compaction.after_measurement_completed = true;
+  console.info(
+    eventMessage.compaction.after_input_tokens === null
+      ? "Compaction after request completed; provider input usage unavailable."
+      : "Compaction after measurement attached.",
+    {
+      compactionMessageId,
+      requestUserId,
+      usesCompactedHistory: true,
+      providerInputTokens: eventMessage.compaction.after_input_tokens,
+    },
+  );
+}
+
 async function requestReply(conversation, userMessage, history) {
   pendingConversationIds.add(conversation.id);
   renderAll();
+  const compactionMessageId = conversation.summary ? conversation.pendingCompactionAfter : null;
   const payload = {
     message: userMessage.content,
     history: history.map((message) => ({ role: message.role, content: message.content })),
     compaction: conversation.summary
       ? { summary: conversation.summary, count: conversation.compactionCount }
       : null,
+    after_measurement_pending: Boolean(compactionMessageId),
   };
   try {
     const response = await fetch("/api/chat", {
@@ -1090,6 +1092,19 @@ async function requestReply(conversation, userMessage, history) {
     }
 
     const compaction = data.compaction || null;
+    if (compactionMessageId &&
+        data.uses_compacted_history === true &&
+        data.first_model_request_completed === true) {
+      recordCompactionAfter(
+        conversation,
+        compactionMessageId,
+        userMessage.id,
+        data.first_model_request_usage,
+      );
+      if (conversation.pendingCompactionAfter === compactionMessageId) {
+        conversation.pendingCompactionAfter = null;
+      }
+    }
     const assistant = {
       id: makeId(),
       role: "assistant",
@@ -1109,11 +1124,39 @@ async function requestReply(conversation, userMessage, history) {
     if (compaction?.summary) {
       conversation.summary = compaction.summary;
       conversation.compactionCount = Number(compaction.count) || conversation.compactionCount + 1;
-      conversation.lastCompactionInputTokens = compaction.triggered_input_tokens ?? null;
     }
-    assistant.compactionCount = conversation.compactionCount;
+    if (compaction?.occurred === true && compaction.summary) {
+      conversation.pendingCompactionAfter = assistant.id;
+      console.info("Compaction completed; after measurement marked pending.", {
+        compactionMessageId: assistant.id,
+        requestUserId: userMessage.id,
+        usesCompactedHistoryOnNextRequest: true,
+        providerBeforeInputTokens: compaction.before_input_tokens,
+      });
+    }
     elements.modelLabel.textContent = assistant.model || "AI assistant";
   } catch (error) {
+    const details = error.providerError;
+    if (compactionMessageId &&
+        details?.uses_compacted_history === true &&
+        details.first_model_request_completed === true) {
+      recordCompactionAfter(
+        conversation,
+        compactionMessageId,
+        userMessage.id,
+        details.first_model_request_usage,
+      );
+      if (conversation.pendingCompactionAfter === compactionMessageId) {
+        conversation.pendingCompactionAfter = null;
+      }
+    } else if (compactionMessageId) {
+      console.info("Compaction after measurement remains pending.", {
+        compactionMessageId,
+        requestUserId: userMessage.id,
+        usesCompactedHistory: details?.uses_compacted_history === true,
+        firstModelRequestCompleted: details?.first_model_request_completed === true,
+      });
+    }
     conversation.messages.push({
       id: makeId(),
       role: "assistant",

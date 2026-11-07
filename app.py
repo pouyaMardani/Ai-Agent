@@ -3,11 +3,8 @@
 import json
 import logging
 import os
-import re
-from unicodedata import name
-import urllib.parse
-import urllib.request
-from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from typing import Any
 
 import openai
@@ -33,10 +30,21 @@ LOGGER = logging.getLogger(__name__)
 class ProviderError(Exception):
     """Raised when a model request fails, retaining completed tool results."""
 
-    def __init__(self, status_code, details, tool_results=None):
+    def __init__(
+        self,
+        status_code,
+        details,
+        tool_results=None,
+        first_model_request_usage=None,
+        first_model_request_completed=False,
+        uses_compacted_history=False,
+    ):
         self.status_code = status_code or 502
         self.details = details or {}
         self.tool_results = list(tool_results or [])
+        self.first_model_request_usage = first_model_request_usage
+        self.first_model_request_completed = first_model_request_completed
+        self.uses_compacted_history = uses_compacted_history
         super().__init__(self.details.get("message") or "The provider rejected the request.")
 
 
@@ -173,6 +181,7 @@ class ChatRequest(BaseModel):
     message: str = Field(default="", description="The newest user message.")
     history: list[dict[str, Any]] = Field(default_factory=list)
     compaction: dict[str, Any] | None = None
+    after_measurement_pending: bool = False
 
 
 class AIApp:
@@ -203,7 +212,7 @@ class AIApp:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if summary:
             messages.append({"role": "system", "content": f"Earlier summary:\n{summary}"})
-        messages.extend(self._normalize_history(history))
+        messages.extend(history)
         messages.append({"role": "user", "content": user_message.strip()})
         return messages
 
@@ -246,13 +255,44 @@ class AIApp:
             return None
         return usage_data
 
-    def _request_model(self, tool_results=None, **request):
+    def _request_model(
+        self,
+        tool_results=None,
+        first_model_request_usage=None,
+        first_model_request_completed=False,
+        uses_compacted_history=False,
+        after_measurement_pending=False,
+        request_type="normal",
+        **request,
+    ):
+        LOGGER.info(
+            "Model request started: type=%s uses_compacted_history=%s after_measurement_pending=%s",
+            request_type,
+            uses_compacted_history,
+            after_measurement_pending,
+        )
         try:
-            return self.client.chat.completions.create(**request)
+            response = self.client.chat.completions.create(**request)
+            usage = self._extract_usage(response)
+            LOGGER.info(
+                "Model request completed: type=%s uses_compacted_history=%s after_measurement_pending=%s provider_input_tokens=%s",
+                request_type,
+                uses_compacted_history,
+                after_measurement_pending,
+                usage.get("input_tokens") if usage else None,
+            )
+            return response
         except openai.APIStatusError as error:
             details = _extract_provider_details(error, self.settings["api_key"])
             details["model"] = request.get("model", self.model)
-            raise ProviderError(details["status"], details, tool_results) from error
+            raise ProviderError(
+                details["status"],
+                details,
+                tool_results,
+                first_model_request_usage,
+                first_model_request_completed,
+                uses_compacted_history,
+            ) from error
         except openai.APIConnectionError as error:
             details = {
                 "status": 502,
@@ -263,7 +303,14 @@ class AIApp:
                 "retry_after": None,
                 "model": request.get("model", self.model),
             }
-            raise ProviderError(502, details, tool_results) from error
+            raise ProviderError(
+                502,
+                details,
+                tool_results,
+                first_model_request_usage,
+                first_model_request_completed,
+                uses_compacted_history,
+            ) from error
         except openai.APIError as error:
             details = {
                 "status": 502,
@@ -274,16 +321,23 @@ class AIApp:
                 "retry_after": None,
                 "model": request.get("model", self.model),
             }
-            raise ProviderError(502, details, tool_results) from error
+            raise ProviderError(
+                502,
+                details,
+                tool_results,
+                first_model_request_usage,
+                first_model_request_completed,
+                uses_compacted_history,
+            ) from error
 
-    def _make_summary(self, history, summary=None):
+    def _make_summary(self, history):
         messages = [{"role": "system", "content": "Write a short summary of the key facts from this conversation."}]
-        if summary:
-            messages.append({"role": "system", "content": f"Previous summary:\n{summary}"})
-        messages.extend(self._normalize_history(history)[-10:])
+        messages.extend(history[-10:])
         messages.append({"role": "user", "content": "Summarize the important points from the conversation."})
 
         result = self._request_model(
+            uses_compacted_history=False,
+            request_type="summary",
             model=self.model,
             messages=messages,
             temperature=0.2,
@@ -331,7 +385,7 @@ class AIApp:
              "search_depth": "basic"
             }
 
-            request = urllib.request.Request(
+            request = Request(
                 url,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
@@ -339,7 +393,7 @@ class AIApp:
             )
 
             try:
-                with urllib.request.urlopen(request, timeout=20) as response:
+                with urlopen(request, timeout=20) as response:
                     data = json.loads(response.read().decode("utf-8"))
     
                 results = []
@@ -357,13 +411,13 @@ class AIApp:
                     "results": results
                 }
     
-            except urllib.error.HTTPError as error:
+            except HTTPError as error:
                 return {
                     "ok": False,
                     "error": f"Tavily API error: {error.code}"
                 }
     
-            except urllib.error.URLError as error:
+            except URLError as error:
                 return {
                     "ok": False,
                     "error": f"Search connection failed: {error.reason}"
@@ -372,27 +426,37 @@ class AIApp:
         return {"ok": False, "error": f"Unknown tool: {name}"}
 
     
-    def _run_model_loop(self, messages):
+    def _run_model_loop(self, messages, uses_compacted_history=False, after_measurement_pending=False):
         current_messages = list(messages)
         tool_call_count = 0
         executed_tools = []
         tool_results = []
+        first_model_request_usage = None
+        first_model_request_completed = False
 
         for _ in range(MAX_TOOL_LOOPS):
             response = self._request_model(
                 tool_results=tool_results,
+                first_model_request_usage=first_model_request_usage,
+                first_model_request_completed=first_model_request_completed,
+                uses_compacted_history=uses_compacted_history,
+                after_measurement_pending=after_measurement_pending,
+                request_type="normal",
                 model=self.model,
                 messages=current_messages,
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.7,
             )
+            if not first_model_request_completed:
+                first_model_request_usage = self._extract_usage(response)
+                first_model_request_completed = True
 
             message = response.choices[0].message
             tool_calls = message.tool_calls or []
 
             if not tool_calls:
-                return response, executed_tools, tool_results
+                return response, executed_tools, first_model_request_usage
 
             if tool_call_count + len(tool_calls) > MAX_TOOL_CALLS:
                 current_messages.append({
@@ -404,12 +468,17 @@ class AIApp:
                 })
                 response = self._request_model(
                     tool_results=tool_results,
+                    first_model_request_usage=first_model_request_usage,
+                    first_model_request_completed=first_model_request_completed,
+                    uses_compacted_history=uses_compacted_history,
+                    after_measurement_pending=after_measurement_pending,
+                    request_type="normal",
                     model=self.model,
                     messages=current_messages,
                     tool_choice="none",
                     temperature=0.7,
                 )
-                return response, executed_tools, tool_results
+                return response, executed_tools, first_model_request_usage
 
             current_messages.append(message.model_dump(exclude_none=True))
 
@@ -431,17 +500,22 @@ class AIApp:
         raise RuntimeError("Tool loop exceeded the safe limit.")
 
 
-    def handle_chat(self, message, history=None, compaction=None):
+    def handle_chat(self, message, history=None, compaction=None, after_measurement_pending=False):
         clean_message = (message or "").strip()
         if not clean_message:
             raise HTTPException(status_code=400, detail="Please type a message first.")
 
-        summary = compaction.get("summary") if isinstance(compaction, dict) else None
+        summary = compaction.get("summary") if compaction else None
+        uses_compacted_history = bool(summary)
         history_list = self._normalize_history(history or [])
         messages = self._build_messages(history_list, clean_message, summary)
 
         try:
-            response, executed_tools, _ = self._run_model_loop(messages)
+            response, executed_tools, first_model_request_usage = self._run_model_loop(
+                messages,
+                uses_compacted_history=uses_compacted_history,
+                after_measurement_pending=after_measurement_pending,
+            )
         except RuntimeError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         reply = response.choices[0].message.content or ""
@@ -453,7 +527,8 @@ class AIApp:
             "before_input_tokens": None,
             "after_input_tokens": None,
         }
-        if usage and usage["input_tokens"] is not None and usage["input_tokens"] >= COMPACTION_THRESHOLD:
+        input_tokens = usage.get("input_tokens") if usage else None
+        if input_tokens is not None and input_tokens >= COMPACTION_THRESHOLD:
             try:
                 result = self._make_summary(history_list + [{"role": "user", "content": clean_message}])
             except ProviderError as error:
@@ -466,12 +541,16 @@ class AIApp:
                     error.details.get("request_id"),
                 )
             else:
+                LOGGER.info(
+                    "Compaction completed for current user request: provider_before_input_tokens=%s after_measurement_pending=true",
+                    input_tokens,
+                )
                 compaction_payload.update({
                     "summary": result["summary"],
                     "occurred": True,
-                    "before_input_tokens": usage["input_tokens"],
-                    "triggered_input_tokens": usage["input_tokens"],
-                    "count": (compaction.get("count") if isinstance(compaction, dict) else 0) + 1,
+                    "before_input_tokens": input_tokens,
+                    "triggered_input_tokens": input_tokens,
+                    "count": (compaction.get("count", 0) if compaction else 0) + 1,
                     "summary_usage": result["usage"],
                 })
 
@@ -479,6 +558,9 @@ class AIApp:
             "reply": reply,
             "model": self.model,
             "usage": usage,
+            "first_model_request_usage": first_model_request_usage,
+            "first_model_request_completed": True,
+            "uses_compacted_history": uses_compacted_history,
             "compaction": compaction_payload,
             "toolCalls": executed_tools,
         }
@@ -501,24 +583,40 @@ def read_config():
 @app.post("/api/chat")
 def chat(request: ChatRequest):
     try:
-        return app_instance.handle_chat(request.message, request.history, request.compaction)
+        return app_instance.handle_chat(
+            request.message,
+            request.history,
+            request.compaction,
+            request.after_measurement_pending,
+        )
     except HTTPException:
         raise
     except ProviderError as error:
         LOGGER.warning(
-            "Provider request failed: status=%s code=%s type=%s request_id=%s retry_after=%s",
+            "Provider request failed: status=%s code=%s type=%s request_id=%s retry_after=%s "
+            "uses_compacted_history=%s first_model_request_completed=%s first_model_input_tokens=%s",
             error.status_code,
             error.details.get("code"),
             error.details.get("type"),
             error.details.get("request_id"),
             error.details.get("retry_after"),
+            error.uses_compacted_history,
+            error.first_model_request_completed,
+            error.first_model_request_usage.get("input_tokens")
+            if error.first_model_request_usage
+            else None,
         )
         headers = {}
         if error.details.get("retry_after"):
             headers["Retry-After"] = str(error.details["retry_after"])
         raise HTTPException(
             status_code=error.status_code,
-            detail=_provider_error_payload(error),
+            detail={
+                **_provider_error_payload(error),
+                "first_model_request_usage": error.first_model_request_usage,
+                "first_model_request_completed": error.first_model_request_completed,
+                "uses_compacted_history": error.uses_compacted_history,
+            },
             headers=headers or None,
         ) from error
     except Exception as error:

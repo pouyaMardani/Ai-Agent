@@ -83,7 +83,7 @@ After a completed model response, the app checks actual input tokens.
 - The summary is stored with the conversation and reused on the next request.
 - The browser keeps the full conversation locally and continues to send its history through the existing API; the backend applies its existing recent-history limit while also receiving the saved summary.
 
-The compaction logic is intentionally simple and based only on actual provider input usage. When the trigger is reached, the app generates and saves a summary for later requests; it does not measure a post-compaction prompt as part of that request. Analytics records the configured 4000-token trigger, whether compaction occurred, and the provider-reported input tokens before compaction. The post-compaction count and reduction remain unavailable unless the provider reports an actual measurement.
+The compaction logic is based only on actual provider input usage. Analytics stores the provider-reported input tokens from the request that triggered compaction as **Before**. After the summary is saved, the first subsequent model request that includes the compacted history supplies **After**, when provider-reported input usage is available. Both values describe complete requests, including system instructions and other request content; After is not the summary's standalone token count. If no qualifying request succeeds or its usage is unavailable, After remains unavailable. Summary-generation usage is shown separately.
 
 If the summary request fails after the answer was generated, the answer is
 still returned and the interface marks the summary failure separately.
