@@ -96,6 +96,9 @@ function normalizeMessage(raw) {
     toolCalls: Array.isArray(raw.toolCalls) ? raw.toolCalls : null,
     retryPrompt: typeof raw.retryPrompt === "string" ? raw.retryPrompt : null,
     model: raw.model || null,
+    providerWarning: typeof raw.providerWarning === "string" ? raw.providerWarning : null,
+    providerError: raw.providerError || null,
+    toolResults: Array.isArray(raw.toolResults) ? raw.toolResults : null,
     isError: raw.isError === true,
   };
 }
@@ -911,6 +914,12 @@ function renderMessage(message) {
     bubble.textContent = message.content;
   }
   content.append(heading, bubble);
+  if (message.providerWarning) {
+    const warning = document.createElement("p");
+    warning.className = "message__notice";
+    warning.textContent = message.providerWarning;
+    content.appendChild(warning);
+  }
 
   const actions = document.createElement("div");
   actions.className = "message-actions";
@@ -1011,6 +1020,50 @@ function showToast(message) {
   showToast.timeoutId = window.setTimeout(() => toast.classList.remove("is-visible"), 2400);
 }
 
+function formatProviderError(details) {
+  if (typeof details === "string") return details;
+  if (!details || typeof details !== "object") return "The request could not be completed.";
+
+  const status = Number(details.status);
+  const lines = [
+    status === 429
+      ? "The AI provider returned HTTP 429 (rate limit or temporary account/model restriction)."
+      : `The AI provider request failed${Number.isFinite(status) ? ` (HTTP ${status})` : ""}.`,
+  ];
+  if (details.message) lines.push(String(details.message));
+  if (details.model) lines.push(`Model: ${details.model}`);
+  if (details.code) lines.push(`Provider code: ${details.code}`);
+  if (details.type) lines.push(`Provider error type: ${details.type}`);
+  if (details.retry_after) {
+    const retryAfter = String(details.retry_after);
+    lines.push(/^\d+(?:\.\d+)?$/.test(retryAfter)
+      ? `Provider retry guidance: wait ${retryAfter} seconds.`
+      : `Provider retry guidance: retry after ${retryAfter}.`);
+  }
+  if (details.rate_limit_reset_requests) {
+    lines.push(`Request limit reset: ${details.rate_limit_reset_requests}`);
+  }
+  if (details.rate_limit_reset_tokens) {
+    lines.push(`Token limit reset: ${details.rate_limit_reset_tokens}`);
+  }
+  if (details.request_id) lines.push(`Request ID: ${details.request_id}`);
+
+  const toolResults = Array.isArray(details.tool_results) ? details.tool_results : [];
+  if (toolResults.length) {
+    lines.push("", "Tool results completed before the model request failed:");
+    for (const item of toolResults) {
+      lines.push(`- ${item.name || "Tool"} result:`);
+      try {
+        lines.push(JSON.stringify(item.result, null, 2));
+      } catch (error) {
+        lines.push(String(item.result));
+      }
+    }
+    lines.push("Retrying may execute these tools again.");
+  }
+  return lines.join("\n");
+}
+
 async function requestReply(conversation, userMessage, history) {
   pendingConversationIds.add(conversation.id);
   renderAll();
@@ -1027,8 +1080,14 @@ async function requestReply(conversation, userMessage, history) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "The request could not be completed.");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const details = data.detail;
+      const error = new Error(formatProviderError(details));
+      error.providerError = details && typeof details === "object" ? details : null;
+      error.toolResults = Array.isArray(details?.tool_results) ? details.tool_results : [];
+      throw error;
+    }
 
     const compaction = data.compaction || null;
     const assistant = {
@@ -1042,6 +1101,9 @@ async function requestReply(conversation, userMessage, history) {
       compaction,
       model: data.model || null,
       toolCalls: Array.isArray(data.toolCalls) ? data.toolCalls : null,
+      providerWarning: compaction?.error
+        ? `Your answer succeeded, but conversation summarization failed:\n${formatProviderError(compaction.error)}`
+        : null,
     };
     conversation.messages.push(assistant);
     if (compaction?.summary) {
@@ -1059,6 +1121,12 @@ async function requestReply(conversation, userMessage, history) {
       createdAt: Date.now(),
       retryUserId: userMessage.id,
       requestUserId: userMessage.id,
+      model: error.providerError?.model || null,
+      providerError: error.providerError || null,
+      toolCalls: Array.isArray(error.toolResults)
+        ? error.toolResults.map((item) => item.name).filter(Boolean)
+        : null,
+      toolResults: Array.isArray(error.toolResults) ? error.toolResults : null,
       isError: true,
     });
   } finally {

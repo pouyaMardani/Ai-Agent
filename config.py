@@ -36,10 +36,17 @@ def get_settings():
 
 
 def create_client(settings):
-    """Create the OpenAI-compatible client."""
+    """Create the OpenAI-compatible client.
+
+    ``max_retries`` is kept at 0 on purpose. The SDK would otherwise retry a
+    429 automatically, which sends a second request against the very same
+    per-minute / account allowance that is already exhausted. Provider-side
+    rate limits and account restrictions are surfaced to the caller instead so
+    the app can decide what to do without silently repeating requests.
+    """
     return OpenAI(
         api_key=settings["api_key"],
         base_url=settings["base_url"],
         timeout=30.0,
-        max_retries=1,
+        max_retries=0,
     )

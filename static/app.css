@@ -667,7 +667,8 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
-.message--error .message__content { color: var(--danger); }
+.message--error .message__content { color: var(--danger); white-space: pre-wrap; font-size: 14px; line-height: 1.65; }
+.message__notice { margin: 10px 0 0; color: var(--danger); font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
 .message__content > :first-child { margin-top: 0; }
 .message__content > :last-child { margin-bottom: 0; }
 .message__content p { margin: 9px 0; }

@@ -20,6 +20,17 @@ MODEL_ID=gpt-4o-mini
 
 The app reads this file automatically.
 
+`BASE_URL` is passed to the OpenAI SDK; if it is omitted, the SDK uses its
+default OpenAI endpoint. `MODEL_ID` is passed to every chat-completion request
+and defaults to `gpt-4o-mini`. The app creates one provider client and disables
+automatic SDK retries (`max_retries=0`), so a failed provider request is not
+silently repeated.
+
+The app does not select or switch to another model automatically. To use an
+alternative, set `MODEL_ID` to a model identifier that you have verified is
+available to your account and compatible with the configured provider and
+tools.
+
 ## 3. Run the app
 
 ```bash
@@ -74,7 +85,23 @@ After a completed model response, the app checks actual input tokens.
 
 The compaction logic is intentionally simple and based only on actual provider input usage. When the trigger is reached, the app generates and saves a summary for later requests; it does not measure a post-compaction prompt as part of that request. Analytics records the configured 4000-token trigger, whether compaction occurred, and the provider-reported input tokens before compaction. The post-compaction count and reduction remain unavailable unless the provider reports an actual measurement.
 
-## 8. Where conversation data is stored
+If the summary request fails after the answer was generated, the answer is
+still returned and the interface marks the summary failure separately.
+
+## 8. Provider errors and HTTP 429
+
+Provider failures are shown with their HTTP status, provider code and message,
+model, request ID, and retry guidance when the provider supplies it. HTTP 429
+can mean ordinary rate limiting or a temporary account-, policy-, or
+model-specific restriction; the app displays the provider's details and does
+not retry automatically. A provider-side restriction cannot be removed by an
+application code change. If the provider continues rejecting the configured
+model, wait for its stated retry window or manually change `MODEL_ID` in the
+project `.env` to a different model that the provider confirms is available
+for this account. The application does not assume that changing models will
+resolve an account restriction.
+
+## 9. Where conversation data is stored
 
 The browser stores the chat data in localStorage. The stored data includes:
 
@@ -85,7 +112,7 @@ The browser stores the chat data in localStorage. The stored data includes:
 
 The interface also supports multiple conversations, conversation search, rename and delete actions, and six selectable visual themes. Existing conversations saved under the earlier `tokenharbor.chat.v1` browser-storage key are read and merged into the current conversation list; the old key is not removed.
 
-## 9. Frontend notes
+## 10. Frontend notes
 
 The page uses the existing `/api/chat` endpoint and does not make extra backend requests for theme, conversation, or analytics interactions. The usage panel shows provider-reported values from completed responses. A missing provider value is displayed as `N/A`.
 

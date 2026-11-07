@@ -10,6 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import openai
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +28,111 @@ except ValueError as error:
 if MAX_TOOL_LOOPS < 1:
     raise RuntimeError("MAX_TOOL_LOOPS must be a positive integer.")
 LOGGER = logging.getLogger(__name__)
+
+
+class ProviderError(Exception):
+    """Raised when a model request fails, retaining completed tool results."""
+
+    def __init__(self, status_code, details, tool_results=None):
+        self.status_code = status_code or 502
+        self.details = details or {}
+        self.tool_results = list(tool_results or [])
+        super().__init__(self.details.get("message") or "The provider rejected the request.")
+
+
+def _extract_provider_details(error, api_key=None):
+    """Summarize an SDK error without exposing the API key or request payload."""
+    response = getattr(error, "response", None)
+    body = getattr(error, "body", None)
+
+    message = None
+    code = None
+    error_type = None
+    if isinstance(body, dict):
+        inner = body.get("error")
+        if isinstance(inner, dict):
+            message = inner.get("message")
+            code = inner.get("code")
+            error_type = inner.get("type")
+        message = message or (body.get("message") if isinstance(body.get("message"), str) else None)
+        code = code or (body.get("code") if isinstance(body.get("code"), str) else None)
+        error_type = error_type or (body.get("type") if isinstance(body.get("type"), str) else None)
+    elif isinstance(body, str):
+        try:
+            parsed_body = json.loads(body)
+        except json.JSONDecodeError:
+            parsed_body = None
+        if isinstance(parsed_body, dict):
+            inner = parsed_body.get("error")
+            if isinstance(inner, dict):
+                message = inner.get("message")
+                code = inner.get("code")
+                error_type = inner.get("type")
+            if message is None and isinstance(parsed_body.get("message"), str):
+                message = parsed_body["message"]
+
+    status_code = getattr(error, "status_code", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    if not isinstance(message, str) or not message:
+        message = "The provider rejected the request."
+    if api_key:
+        message = message.replace(api_key, "[redacted]")
+
+    request_id = getattr(error, "request_id", None)
+    retry_after = None
+    rate_limit_reset_requests = None
+    rate_limit_reset_tokens = None
+    if response is not None:
+        headers = getattr(response, "headers", None)
+        if headers:
+            retry_after = headers.get("retry-after")
+            rate_limit_reset_requests = headers.get("x-ratelimit-reset-requests")
+            rate_limit_reset_tokens = headers.get("x-ratelimit-reset-tokens")
+            request_id = request_id or headers.get("x-request-id")
+
+    return {
+        "status": status_code,
+        "message": message,
+        "code": code,
+        "type": error_type,
+        "request_id": request_id,
+        "retry_after": retry_after,
+        "rate_limit_reset_requests": rate_limit_reset_requests,
+        "rate_limit_reset_tokens": rate_limit_reset_tokens,
+    }
+
+
+def _classify_provider_error(status_code):
+    """Map an HTTP status code to a coarse reason the frontend can present."""
+    if status_code == 429:
+        return "rate_limit_or_restriction"
+    if status_code in (401, 403):
+        return "auth"
+    if status_code == 404:
+        return "model_not_found"
+    if status_code and status_code >= 500:
+        return "provider_unavailable"
+    return "provider_error"
+
+
+def _provider_error_payload(error):
+    details = error.details
+    return {
+        "kind": _classify_provider_error(error.status_code),
+        "status": error.status_code,
+        "message": details.get("message"),
+        "code": details.get("code"),
+        "type": details.get("type"),
+        "request_id": details.get("request_id"),
+        "retry_after": details.get("retry_after"),
+        "rate_limit_reset_requests": details.get("rate_limit_reset_requests"),
+        "rate_limit_reset_tokens": details.get("rate_limit_reset_tokens"),
+        "model": details.get("model"),
+        "executed_tools": [result.get("name") for result in error.tool_results],
+        "tool_results": error.tool_results,
+    }
+
 
 TOOLS = [
     {
@@ -140,6 +246,36 @@ class AIApp:
             return None
         return usage_data
 
+    def _request_model(self, tool_results=None, **request):
+        try:
+            return self.client.chat.completions.create(**request)
+        except openai.APIStatusError as error:
+            details = _extract_provider_details(error, self.settings["api_key"])
+            details["model"] = request.get("model", self.model)
+            raise ProviderError(details["status"], details, tool_results) from error
+        except openai.APIConnectionError as error:
+            details = {
+                "status": 502,
+                "message": "Could not connect to the configured AI provider.",
+                "code": None,
+                "type": type(error).__name__,
+                "request_id": None,
+                "retry_after": None,
+                "model": request.get("model", self.model),
+            }
+            raise ProviderError(502, details, tool_results) from error
+        except openai.APIError as error:
+            details = {
+                "status": 502,
+                "message": "The AI provider returned an invalid response.",
+                "code": None,
+                "type": type(error).__name__,
+                "request_id": getattr(error, "request_id", None),
+                "retry_after": None,
+                "model": request.get("model", self.model),
+            }
+            raise ProviderError(502, details, tool_results) from error
+
     def _make_summary(self, history, summary=None):
         messages = [{"role": "system", "content": "Write a short summary of the key facts from this conversation."}]
         if summary:
@@ -147,7 +283,7 @@ class AIApp:
         messages.extend(self._normalize_history(history)[-10:])
         messages.append({"role": "user", "content": "Summarize the important points from the conversation."})
 
-        result = self.client.chat.completions.create(
+        result = self._request_model(
             model=self.model,
             messages=messages,
             temperature=0.2,
@@ -232,17 +368,19 @@ class AIApp:
                     "ok": False,
                     "error": f"Search connection failed: {error.reason}"
                 }
-    
-            return {"ok": False, "error": f"Unknown tool: {name}"}
+        
+        return {"ok": False, "error": f"Unknown tool: {name}"}
 
     
     def _run_model_loop(self, messages):
         current_messages = list(messages)
         tool_call_count = 0
         executed_tools = []
+        tool_results = []
 
         for _ in range(MAX_TOOL_LOOPS):
-            response = self.client.chat.completions.create(
+            response = self._request_model(
+                tool_results=tool_results,
                 model=self.model,
                 messages=current_messages,
                 tools=TOOLS,
@@ -254,7 +392,7 @@ class AIApp:
             tool_calls = message.tool_calls or []
 
             if not tool_calls:
-                return response, executed_tools
+                return response, executed_tools, tool_results
 
             if tool_call_count + len(tool_calls) > MAX_TOOL_CALLS:
                 current_messages.append({
@@ -264,19 +402,24 @@ class AIApp:
                         "Answer the user using the information already available."
                     ),
                 })
-                response = self.client.chat.completions.create(
+                response = self._request_model(
+                    tool_results=tool_results,
                     model=self.model,
                     messages=current_messages,
                     tool_choice="none",
                     temperature=0.7,
                 )
-                return response, executed_tools
+                return response, executed_tools, tool_results
 
             current_messages.append(message.model_dump(exclude_none=True))
 
             for tool_call in tool_calls:
                 tool_result = self._execute_tool(tool_call)
                 executed_tools.append(tool_call.function.name)
+                tool_results.append({
+                    "name": tool_call.function.name,
+                    "result": tool_result,
+                })
                 current_messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -298,7 +441,7 @@ class AIApp:
         messages = self._build_messages(history_list, clean_message, summary)
 
         try:
-            response, executed_tools = self._run_model_loop(messages)
+            response, executed_tools, _ = self._run_model_loop(messages)
         except RuntimeError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         reply = response.choices[0].message.content or ""
@@ -311,15 +454,26 @@ class AIApp:
             "after_input_tokens": None,
         }
         if usage and usage["input_tokens"] is not None and usage["input_tokens"] >= COMPACTION_THRESHOLD:
-            result = self._make_summary(history_list + [{"role": "user", "content": clean_message}])
-            compaction_payload.update({
-                "summary": result["summary"],
-                "occurred": True,
-                "before_input_tokens": usage["input_tokens"],
-                "triggered_input_tokens": usage["input_tokens"],
-                "count": (compaction.get("count") if isinstance(compaction, dict) else 0) + 1,
-                "summary_usage": result["usage"],
-            })
+            try:
+                result = self._make_summary(history_list + [{"role": "user", "content": clean_message}])
+            except ProviderError as error:
+                compaction_payload["error"] = _provider_error_payload(error)
+                LOGGER.warning(
+                    "Conversation summary request failed: status=%s code=%s type=%s request_id=%s",
+                    error.status_code,
+                    error.details.get("code"),
+                    error.details.get("type"),
+                    error.details.get("request_id"),
+                )
+            else:
+                compaction_payload.update({
+                    "summary": result["summary"],
+                    "occurred": True,
+                    "before_input_tokens": usage["input_tokens"],
+                    "triggered_input_tokens": usage["input_tokens"],
+                    "count": (compaction.get("count") if isinstance(compaction, dict) else 0) + 1,
+                    "summary_usage": result["usage"],
+                })
 
         return {
             "reply": reply,
@@ -350,8 +504,26 @@ def chat(request: ChatRequest):
         return app_instance.handle_chat(request.message, request.history, request.compaction)
     except HTTPException:
         raise
+    except ProviderError as error:
+        LOGGER.warning(
+            "Provider request failed: status=%s code=%s type=%s request_id=%s retry_after=%s",
+            error.status_code,
+            error.details.get("code"),
+            error.details.get("type"),
+            error.details.get("request_id"),
+            error.details.get("retry_after"),
+        )
+        headers = {}
+        if error.details.get("retry_after"):
+            headers["Retry-After"] = str(error.details["retry_after"])
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=_provider_error_payload(error),
+            headers=headers or None,
+        ) from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail=str(error)) from error
+        LOGGER.error("Unexpected chat request failure: %s", type(error).__name__)
+        raise HTTPException(status_code=500, detail="An unexpected application error occurred.") from error
 
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
